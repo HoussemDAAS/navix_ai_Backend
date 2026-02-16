@@ -50,4 +50,12 @@ export class ScraperService {
   async getActorRun(runId: string) {
     return this.apifyClient.run(runId).get();
   }
+
+  /**
+   * Fetch items from a dataset.
+   * @param datasetId The dataset ID (usually run.defaultDatasetId).
+   */
+  async getDatasetItems(datasetId: string) {
+    return this.apifyClient.dataset(datasetId).listItems();
+  }
 }
