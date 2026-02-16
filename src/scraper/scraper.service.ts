@@ -40,8 +40,6 @@ export class ScraperService {
       searchType: 'hashtag', // or 'user', dependent on the actor capability
       resultsLimit: 15,
     });
-
-    this.logger.log(`Apify run started: ${run.id}`);
     return { runId: run.id };
   }
 
