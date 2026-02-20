@@ -1,20 +1,24 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Controller, Post, Body, Logger, HttpCode, HttpStatus } from '@nestjs/common';
 import { ScraperService } from './scraper.service';
+import { DiscoverCompetitorsDto } from './dto/discover-competitors.dto';
 
-// 1. @Controller('scraper') means all routes in this file start with /scraper
 @Controller('scraper')
 export class ScraperController {
-  
-  // Dependency Injection: NestJS automatically gives us the ScraperService
+  private readonly logger = new Logger(ScraperController.name);
+
   constructor(private readonly scraperService: ScraperService) {}
 
-  // 2. @Post('discover') creates a POST endpoint at /scraper/discover
   @Post('discover')
-  async discoverCompetitors(@Body() body: { niche: string; location: string }) {
-    // 3. We extract niche and location from the request body
-    const { niche, location } = body;
+  @HttpCode(HttpStatus.CREATED)
+  async discover(@Body() dto: DiscoverCompetitorsDto) {
+    this.logger.log(`Received discovery request for niche: ${dto.niche}, location: ${dto.location || 'none'}.`);
     
-    // 4. We delegate the "heavy lifting" to the Service
-    return this.scraperService.searchCompetitors(niche, location);
+    // Pass niche and location to the ScraperService
+    const result = await this.scraperService.discoverCompetitors(dto.niche, dto.location);
+    
+    return {
+      message: 'Discovery jobs initiated successfully',
+      data: result,
+    };
   }
 }

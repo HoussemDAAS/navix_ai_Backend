@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ApifyClient } from 'apify-client';
+import { ApifyClient, WebhookEventType } from 'apify-client';
 
 @Injectable()
 export class ScraperService {
@@ -20,27 +20,43 @@ export class ScraperService {
   }
 
   /**
-   * Search for competitors on Instagram.
-   * This triggers the 'apify/instagram-scraper' Actor.
-   * @param niche The niche or keywords to search for.
-   * @param location location to refine search (if supported by actor)
-   * @returns object containing the runId
+   * Discover competitors based on niche and location.
+   * Routes to specific Apify actors for IG and TikTok search.
+   * @param niche The niche or keyword
+   * @param location Optional location
    */
-  async searchCompetitors(niche: string, location: string) {
-    this.logger.log(`Starting competitor search for niche: ${niche} in ${location}`);
+  async discoverCompetitors(niche: string, location?: string) {
+    const query = `${niche} ${location || ''}`.trim();
+    this.logger.log(`Starting competitor discovery for query: "${query}"`);
     
-    // Using 'apify/instagram-scraper' as the primary actor for this task.
-    // Input schema assumes standard searchUrl or search terms.
-    // For now, we'll simulate a search by scraping a specific hashtag or profile related to the niche.
-    // Since direct "search" is tricky on IG, we might need a different actor or strategy.
-    // However, adhering to the plan:
+    const runIds: { query: string; platform: string; runId: string }[] = [];
     
-    const run = await this.apifyClient.actor('apify/instagram-scraper').call({
-      search: `${niche} ${location}`,
-      searchType: 'hashtag', // or 'user', dependent on the actor capability
-      resultsLimit: 15,
-    });
-    return { runId: run.id };
+    // We fetch the webhook URL from environment. For local testing, this is the Ngrok URL.
+    const webhookUrl = this.configService.get<string>('APIFY_WEBHOOK_URL');
+    const webhooks = webhookUrl ? [{
+        eventTypes: ['ACTOR.RUN.SUCCEEDED' as WebhookEventType],
+        requestUrl: webhookUrl,
+    }] : undefined;
+
+    // Trigger Instagram Search
+    this.logger.log(`Triggering Instagram discovery for: ${query}`);
+    const igRun = await this.apifyClient.actor('apify/instagram-search-scraper').call({
+      search: query,
+      searchType: 'user',
+      searchLimit: 15,
+    }, { webhooks });
+    runIds.push({ query, platform: 'INSTAGRAM', runId: igRun.id });
+
+    // Trigger TikTok Search (using clockworks/tiktok-scraper)
+    this.logger.log(`Triggering TikTok discovery for: ${query}`);
+    const ttRun = await this.apifyClient.actor('clockworks/tiktok-scraper').call({
+      searchQueries: [query],
+      searchSection: '/user',
+      resultsPerPage: 15,
+    }, { webhooks });
+    runIds.push({ query, platform: 'TIKTOK', runId: ttRun.id });
+
+    return { runs: runIds };
   }
 
   /**
