@@ -4,12 +4,14 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { ScraperModule } from './scraper/scraper.module';
 import { SupabaseModule } from './supabase/supabase.module';
+import { ProjectsModule } from './projects/projects.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     SupabaseModule,
     ScraperModule,
+    ProjectsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
