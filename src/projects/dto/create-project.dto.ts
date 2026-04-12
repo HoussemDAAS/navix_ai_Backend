@@ -1,10 +1,6 @@
-import { IsNotEmpty, IsOptional, IsString, IsUUID } from 'class-validator';
+import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
 export class CreateProjectDto {
-  @IsUUID()
-  @IsNotEmpty()
-  user_id: string;
-
   @IsString()
   @IsNotEmpty()
   name: string;
@@ -20,4 +16,24 @@ export class CreateProjectDto {
   @IsString()
   @IsOptional()
   language?: string;
+
+  @IsString()
+  @IsOptional()
+  persona?: string;
+
+  @IsString()
+  @IsOptional()
+  website?: string;
+
+  @IsString()
+  @IsOptional()
+  instagram_handle?: string;
+
+  @IsString()
+  @IsOptional()
+  tiktok_handle?: string;
+
+  @IsString()
+  @IsOptional()
+  youtube_handle?: string;
 }

@@ -11,10 +11,15 @@ export class SupabaseService implements OnModuleInit {
 
   onModuleInit() {
     const supabaseUrl = this.configService.get<string>('SUPABASE_URL');
-    const supabaseKey = this.configService.get<string>('SUPABASE_KEY');
+    // Use service role key to bypass RLS — backend handles auth via SupabaseAuthGuard
+    const serviceRoleKey = this.configService.get<string>('SUPABASE_SERVICE_ROLE_KEY');
+    const anonKey = this.configService.get<string>('SUPABASE_KEY');
+    const supabaseKey = serviceRoleKey || anonKey;
+
+    this.logger.log(`Using ${serviceRoleKey ? 'service_role' : 'anon'} key`);
 
     if (!supabaseUrl || !supabaseKey) {
-      this.logger.error('SUPABASE_URL or SUPABASE_KEY is missing in environment variables');
+      this.logger.error('SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing in environment variables');
       return;
     }
 

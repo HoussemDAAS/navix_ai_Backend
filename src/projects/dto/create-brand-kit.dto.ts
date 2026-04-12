@@ -7,6 +7,18 @@ export class CreateBrandKitDto {
 
   @IsString()
   @IsOptional()
+  formality_level?: string;
+
+  @IsString()
+  @IsOptional()
+  vocab_exclude?: string;
+
+  @IsString()
+  @IsOptional()
+  objective?: string;
+
+  @IsString()
+  @IsOptional()
   target_audience?: string;
 
   @IsArray()
