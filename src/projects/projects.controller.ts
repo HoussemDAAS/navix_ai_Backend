@@ -56,6 +56,18 @@ export class ProjectsController {
     };
   }
 
+  @Get(':id/brand-kit')
+  async getBrandKit(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+  ) {
+    const brandKit = await this.projectsService.getBrandKit(id, user.id);
+    return {
+      message: 'Brand kit retrieved successfully',
+      data: brandKit,
+    };
+  }
+
   @Post(':id/brand-kit')
   @HttpCode(HttpStatus.OK)
   async saveBrandKit(

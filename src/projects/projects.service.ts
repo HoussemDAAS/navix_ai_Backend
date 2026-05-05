@@ -77,6 +77,27 @@ export class ProjectsService {
     return data;
   }
 
+  async getBrandKit(projectId: string, userId: string) {
+    await this.getProject(projectId, userId);
+
+    const client = this.supabaseService.getClient();
+    const { data, error } = await client
+      .from('brand_kits')
+      .select('*')
+      .eq('project_id', projectId)
+      .single();
+
+    if (error && error.code !== 'PGRST116') {
+      this.logger.error(
+        `Failed to fetch brand kit for project ${projectId}`,
+        error,
+      );
+      throw new Error(error.message);
+    }
+
+    return data ?? null;
+  }
+
   async saveBrandKit(
     projectId: string,
     dto: CreateBrandKitDto,
