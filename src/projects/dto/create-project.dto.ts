@@ -1,4 +1,11 @@
-import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import {
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  IsArray,
+  ArrayMaxSize,
+  MaxLength,
+} from 'class-validator';
 
 export class CreateProjectDto {
   @IsString()
@@ -36,4 +43,26 @@ export class CreateProjectDto {
   @IsString()
   @IsOptional()
   youtube_handle?: string;
+
+  @IsString()
+  @IsOptional()
+  facebook_handle?: string;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(1000)
+  niche_description?: string;
+
+  @IsArray()
+  @IsOptional()
+  @IsString({ each: true })
+  @ArrayMaxSize(15)
+  keywords?: string[];
+
+  /** Benchmark accounts as links or @handles; stored as "platform:handle" */
+  @IsArray()
+  @IsOptional()
+  @IsString({ each: true })
+  @ArrayMaxSize(5)
+  seed_accounts?: string[];
 }

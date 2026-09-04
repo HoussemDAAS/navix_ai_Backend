@@ -137,6 +137,44 @@ export class JobsService {
     return this.updateJobStatus(jobId, 'active');
   }
 
+  /**
+   * Update progress (0-100) and a free-form output snapshot (stage, counters)
+   * without changing the status. Errors are logged, never thrown, so that
+   * progress reporting can never break the work being reported on.
+   */
+  async updateProgress(
+    jobId: string,
+    progress: number,
+    output: Record<string, unknown>,
+  ): Promise<void> {
+    const client = this.supabaseService.getClient();
+    const { error } = await client
+      .from('jobs')
+      .update({ progress: Math.max(0, Math.min(100, Math.round(progress))), output })
+      .eq('id', jobId);
+    if (error) {
+      this.logger.warn(`Failed to update progress for job ${jobId}: ${error.message}`);
+    }
+  }
+
+  /** Latest job of a given type for a project (or null). */
+  async getLatestJob(projectId: string, type: JobType): Promise<JobRecord | null> {
+    const client = this.supabaseService.getClient();
+    const { data, error } = await client
+      .from('jobs')
+      .select('*')
+      .eq('project_id', projectId)
+      .eq('type', type)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) {
+      this.logger.warn(`Failed to fetch latest ${type} job for ${projectId}: ${error.message}`);
+      return null;
+    }
+    return (data as JobRecord | null) ?? null;
+  }
+
   async setCompleted(jobId: string, output: Record<string, unknown>): Promise<JobRecord> {
     return this.updateJobStatus(jobId, 'completed', output);
   }

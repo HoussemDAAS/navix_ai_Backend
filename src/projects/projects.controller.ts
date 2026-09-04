@@ -8,6 +8,7 @@ import {
   Patch,
   ParseUUIDPipe,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { ProjectsService } from './projects.service';
@@ -79,6 +80,35 @@ export class ProjectsController {
     return {
       message: 'Brand kit saved successfully',
       data: brandKit,
+    };
+  }
+
+  @Get(':id/discovery')
+  async getDiscoveryStatus(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+  ) {
+    const status = await this.projectsService.getDiscoveryStatus(id, user.id);
+    return {
+      message: 'Discovery status retrieved successfully',
+      data: status,
+    };
+  }
+
+  @Get(':id/insights')
+  async getInsights(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+    @Query('refresh') refresh?: string,
+  ) {
+    const insights = await this.projectsService.getInsights(
+      id,
+      user.id,
+      refresh === 'true',
+    );
+    return {
+      message: 'Insights retrieved successfully',
+      data: insights,
     };
   }
 

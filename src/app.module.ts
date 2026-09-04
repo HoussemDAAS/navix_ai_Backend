@@ -8,6 +8,11 @@ import { AuthModule } from './auth/auth.module';
 import { JobsModule } from './jobs/jobs.module';
 import { AiModule } from './ai/ai.module';
 import { AnalysisModule } from './analysis/analysis.module';
+import { ScrapingModule } from './scraping/scraping.module';
+import { EmbeddingsModule } from './embeddings/embeddings.module';
+import { DirectionsModule } from './directions/directions.module';
+import { DraftsModule } from './drafts/drafts.module';
+import { CalendarModule } from './calendar/calendar.module';
 
 @Module({
   imports: [
@@ -20,6 +25,11 @@ import { AnalysisModule } from './analysis/analysis.module';
     JobsModule,
     AiModule,
     AnalysisModule,
+    EmbeddingsModule,
+    ScrapingModule,
+    DirectionsModule,
+    DraftsModule,
+    CalendarModule,
   ],
 })
 export class AppModule {}
