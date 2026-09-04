@@ -9,13 +9,27 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { AnalysisService } from './analysis.service';
+import { AnalyticsService } from './analytics.service';
 import { SupabaseAuthGuard } from '../auth/supabase-auth.guard';
 import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
 
 @Controller('projects/:id/analysis')
 @UseGuards(SupabaseAuthGuard)
 export class AnalysisController {
-  constructor(private readonly analysisService: AnalysisService) {}
+  constructor(
+    private readonly analysisService: AnalysisService,
+    private readonly analyticsService: AnalyticsService,
+  ) {}
+
+  /** Quantitative field data computed from scraped posts — no AI involved. */
+  @Get('field')
+  async getFieldAnalytics(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+  ) {
+    const data = await this.analyticsService.getFieldAnalytics(id, user.id);
+    return { message: 'Field analytics computed', data };
+  }
 
   @Post('run')
   @HttpCode(HttpStatus.ACCEPTED)
