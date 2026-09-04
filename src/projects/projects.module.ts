@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ProjectsController } from './projects.controller';
 import { ProjectsService } from './projects.service';
+import { ProfileInsightsService } from './profile-insights.service';
 import { SupabaseModule } from '../supabase/supabase.module';
 import { ScrapingModule } from '../scraping/scraping.module';
 import { EmbeddingsModule } from '../embeddings/embeddings.module';
@@ -10,7 +11,7 @@ import { JobsModule } from '../jobs/jobs.module';
 @Module({
   imports: [SupabaseModule, ScrapingModule, EmbeddingsModule, ScraperModule, JobsModule],
   controllers: [ProjectsController],
-  providers: [ProjectsService],
+  providers: [ProjectsService, ProfileInsightsService],
   exports: [ProjectsService],
 })
 export class ProjectsModule {}

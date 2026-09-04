@@ -13,7 +13,7 @@ import { SupabaseService } from '../supabase/supabase.service';
  * and for the user's own account.
  */
 
-interface ContentRow {
+export interface ContentRow {
   competitor_id: string | null;
   source_type: string;
   platform: string;
@@ -93,7 +93,7 @@ export interface FieldAnalytics {
   };
 }
 
-const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+export const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 function round(n: number, digits = 1): number {
   const f = 10 ** digits;
@@ -153,7 +153,7 @@ function topPosts(rows: ContentRow[], limit = 3): TopPost[] {
     }));
 }
 
-function accountAnalytics(
+export function accountAnalytics(
   base: { id: string | null; handle: string; platform: string; avatar_url: string | null; followers_count: number | null; tracked: boolean },
   rows: ContentRow[],
 ): AccountAnalytics {

@@ -12,6 +12,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ProjectsService } from './projects.service';
+import { ProfileInsightsService } from './profile-insights.service';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { CreateBrandKitDto } from './dto/create-brand-kit.dto';
 import { UpdateCompetitorDto } from './dto/update-competitor.dto';
@@ -21,7 +22,10 @@ import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
 @Controller('projects')
 @UseGuards(SupabaseAuthGuard)
 export class ProjectsController {
-  constructor(private readonly projectsService: ProjectsService) {}
+  constructor(
+    private readonly projectsService: ProjectsService,
+    private readonly profileInsightsService: ProfileInsightsService,
+  ) {}
 
   @Get()
   async getAllProjects(@CurrentUser() user: AuthUser) {
@@ -122,6 +126,32 @@ export class ProjectsController {
       message: 'Competitors retrieved successfully',
       data: competitors,
     };
+  }
+
+  @Get(':id/competitors/:competitorId/profile')
+  async getCompetitorProfile(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('competitorId', ParseUUIDPipe) competitorId: string,
+    @CurrentUser() user: AuthUser,
+    @Query('refresh') refresh?: string,
+  ) {
+    const data = await this.profileInsightsService.getCompetitorProfile(
+      id,
+      competitorId,
+      user.id,
+      refresh === 'true',
+    );
+    return { message: 'Competitor profile retrieved successfully', data };
+  }
+
+  @Get(':id/self-profile')
+  async getSelfProfile(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+    @Query('refresh') refresh?: string,
+  ) {
+    const data = await this.profileInsightsService.getSelfProfile(id, user.id, refresh === 'true');
+    return { message: 'Profile retrieved successfully', data };
   }
 
   @Patch(':id/competitors/:competitorId')
