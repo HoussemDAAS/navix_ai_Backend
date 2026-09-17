@@ -1,6 +1,7 @@
 import {
   Injectable,
   Logger,
+  BadRequestException,
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
@@ -8,8 +9,9 @@ import { SupabaseService } from '../supabase/supabase.service';
 import { ScrapingService } from '../scraping/scraping.service';
 import { OpenAIService } from '../embeddings/openai.service';
 import { ScraperService } from '../scraper/scraper.service';
+import { AvatarStorageService } from '../scraper/avatar-storage.service';
 import { JobsService } from '../jobs/jobs.service';
-import { resolveSeedAccount } from '../common/social-links';
+import { resolveSeedAccount, resolveSocialLink } from '../common/social-links';
 
 export interface DiscoveryStatus {
   status: 'idle' | 'pending' | 'active' | 'completed' | 'failed';
@@ -47,8 +49,102 @@ export class ProjectsService {
     private readonly scrapingService: ScrapingService,
     private readonly openaiService: OpenAIService,
     private readonly scraperService: ScraperService,
+    private readonly avatarStorage: AvatarStorageService,
     private readonly jobsService: JobsService,
   ) {}
+
+  /**
+   * Manual add: paste any Instagram/TikTok profile link (or @handle) and it
+   * becomes a fully-enriched, tracked competitor — real profile data now,
+   * content scrape and "find similar" refinement in the background.
+   */
+  async addCompetitor(projectId: string, link: string, userId: string) {
+    await this.getProject(projectId, userId);
+    const parsed = await resolveSocialLink(link.trim());
+    if (!parsed) {
+      throw new BadRequestException("That doesn't look like a social profile link or @handle.");
+    }
+    if (parsed.platform !== 'instagram' && parsed.platform !== 'tiktok') {
+      throw new BadRequestException('Only Instagram and TikTok profiles can be added for now.');
+    }
+    const handle = parsed.handle.toLowerCase();
+    const platform = parsed.platform.toUpperCase();
+    const client = this.supabaseService.getClient();
+
+    const { data: dup } = await client
+      .from('competitors')
+      .select('id')
+      .eq('project_id', projectId)
+      .eq('handle', handle)
+      .eq('platform', platform)
+      .maybeSingle();
+    if (dup) throw new BadRequestException(`@${handle} is already in your competitor list.`);
+
+    // Read the real profile so the card is complete from the first render
+    const profile = await this.scraperService.scrapeProfile(handle, parsed.platform).catch((err) => {
+      this.logger.warn(`Manual add: profile scrape failed for @${handle}: ${(err as Error).message}`);
+      return null;
+    });
+
+    const { data: inserted, error } = await client
+      .from('competitors')
+      .insert({
+        project_id: projectId,
+        handle,
+        platform,
+        full_name: profile?.full_name ?? null,
+        biography: profile?.biography ?? null,
+        followers_count: profile?.followers_count ?? null,
+        following_count: profile?.following_count ?? null,
+        posts_count: profile?.posts_count ?? null,
+        avatar_url: profile?.avatar_url ?? null,
+        discovery_method: 'manual',
+        confidence_score: 90,
+        inclusion_reason: 'Added by you.',
+        validated_by_user: true,
+      })
+      .select()
+      .single();
+    if (error || !inserted) {
+      throw new Error(`Failed to add competitor: ${error?.message ?? 'unknown'}`);
+    }
+    const row = inserted as Record<string, unknown>;
+
+    if (profile?.avatar_url) {
+      const stored = await this.avatarStorage.persist(profile.avatar_url, `competitors/${row.id as string}`);
+      if (stored) {
+        await client.from('competitors').update({ avatar_url: stored }).eq('id', row.id as string);
+        row.avatar_url = stored;
+      }
+    }
+    this.insightsCache.delete(projectId);
+    this.logger.log(`Manual competitor added: @${handle} (${platform}) to project ${projectId}`);
+
+    // Same follow-ups as tracking: scrape their content + find similar accounts
+    this.scrapingService
+      .scrapeCompetitor(projectId, row.id as string, userId, {})
+      .catch((err) => this.logger.error(`Manual add auto-scrape failed: ${(err as Error).message}`));
+    const { data: project } = await client
+      .from('projects')
+      .select('name, niche, location, persona, instagram_handle, tiktok_handle, niche_description, keywords')
+      .eq('id', projectId)
+      .single();
+    const p = (project ?? {}) as Record<string, unknown>;
+    this.scraperService.expandFromCompetitor(projectId, { handle, platform }, {
+      niche: (p.niche as string) ?? '',
+      location: (p.location as string) ?? undefined,
+      projectId,
+      userId,
+      persona: (p.persona as string) ?? undefined,
+      entityName: (p.name as string) ?? undefined,
+      instagramHandle: (p.instagram_handle as string) ?? undefined,
+      tiktokHandle: (p.tiktok_handle as string) ?? undefined,
+      nicheDescription: (p.niche_description as string) ?? undefined,
+      keywords: (p.keywords as string[]) ?? undefined,
+    });
+
+    return row;
+  }
 
   /** Live status of the latest discovery/expand job for the project overview and competitors screen. */
   async getDiscoveryStatus(projectId: string, userId: string): Promise<DiscoveryStatus> {
@@ -432,8 +528,18 @@ export class ProjectsService {
         JSON.stringify(payload),
       );
     } catch (err) {
-      this.logger.error(`Insights generation failed: ${(err as Error).message}`);
-      throw new Error('AI insights generation failed — try again in a moment');
+      // AI being down (no credits, rate limit, outage) must never 500 the
+      // overview — return an honest unavailable state the widget can render.
+      const message = (err as Error).message;
+      this.logger.warn(`Insights generation failed: ${message}`);
+      const unavailable: Record<string, unknown> = {
+        available: false,
+        reason: /credit|quota|429|billing/i.test(message) ? 'no_ai_credits' : 'ai_error',
+        top_competitors: top,
+        thin_data: rows.length < 10,
+      };
+      this.insightsCache.set(projectId, { data: unavailable, ts: Date.now() });
+      return unavailable;
     }
 
     const result: Record<string, unknown> = {

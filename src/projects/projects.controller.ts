@@ -16,6 +16,7 @@ import { ProfileInsightsService } from './profile-insights.service';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { CreateBrandKitDto } from './dto/create-brand-kit.dto';
 import { UpdateCompetitorDto } from './dto/update-competitor.dto';
+import { AddCompetitorDto } from './dto/add-competitor.dto';
 import { SupabaseAuthGuard } from '../auth/supabase-auth.guard';
 import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
 
@@ -126,6 +127,17 @@ export class ProjectsController {
       message: 'Competitors retrieved successfully',
       data: competitors,
     };
+  }
+
+  @Post(':id/competitors')
+  @HttpCode(HttpStatus.CREATED)
+  async addCompetitor(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+    @Body() dto: AddCompetitorDto,
+  ) {
+    const competitor = await this.projectsService.addCompetitor(id, dto.link, user.id);
+    return { message: 'Competitor added successfully', data: competitor };
   }
 
   @Get(':id/competitors/:competitorId/profile')

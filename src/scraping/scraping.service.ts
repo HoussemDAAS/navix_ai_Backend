@@ -11,6 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ApifyService, APIFY_ACTORS } from './apify.service';
 import { EmbeddingsService } from '../embeddings/embeddings.service';
+import { AvatarStorageService } from '../scraper/avatar-storage.service';
 import { normalizeScrapedItems } from './content-normalizer';
 import {
   ScrapeSelfDto,
@@ -88,6 +89,7 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
     private readonly supabaseService: SupabaseService,
     private readonly apifyService: ApifyService,
     private readonly embeddingsService: EmbeddingsService,
+    private readonly avatarStorage: AvatarStorageService,
   ) {
     this.webhookUrl = this.configService.get<string>(
       'APIFY_SCRAPE_WEBHOOK_URL',
@@ -288,6 +290,40 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
     return job;
   }
 
+  /** Replace expiring CDN thumbnail links on the given rows with permanent storage copies. */
+  private async persistThumbnails(contentIds: string[]): Promise<void> {
+    if (contentIds.length === 0) return;
+    const client = this.supabaseService.getClient();
+    const { data } = await client
+      .from('scraped_content')
+      .select('id, thumbnail_url')
+      .in('id', contentIds)
+      .not('thumbnail_url', 'is', null);
+    const rows = ((data ?? []) as Array<{ id: string; thumbnail_url: string }>).filter(
+      (r) => !this.avatarStorage.isStorageUrl(r.thumbnail_url),
+    );
+    if (rows.length === 0) return;
+
+    let saved = 0;
+    const queue = [...rows];
+    const workers = Array.from({ length: 4 }, async () => {
+      for (;;) {
+        const row = queue.shift();
+        if (!row) return;
+        const url = await this.avatarStorage.persist(row.thumbnail_url, `posts/${row.id}`);
+        if (url) {
+          const { error } = await client
+            .from('scraped_content')
+            .update({ thumbnail_url: url })
+            .eq('id', row.id);
+          if (!error) saved += 1;
+        }
+      }
+    });
+    await Promise.all(workers);
+    this.logger.log(`Persisted ${saved}/${rows.length} post thumbnails to storage`);
+  }
+
   /**
    * Called from webhooks.controller when Apify webhook fires.
    * Also used by the polling fallback.
@@ -376,6 +412,14 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
           `scrape_job=${scrapeJobId} embeddings failed: ${(err as Error).message}`,
         );
       });
+
+    // Copy post thumbnails into our own storage while the CDN links are still
+    // fresh — Instagram signs them and they die within weeks (non-blocking).
+    this.persistThumbnails(insertedIds).catch((err) => {
+      this.logger.warn(
+        `scrape_job=${scrapeJobId} thumbnail persistence failed: ${(err as Error).message}`,
+      );
+    });
 
     await this.updateJob(scrapeJobId, {
       status: 'completed',

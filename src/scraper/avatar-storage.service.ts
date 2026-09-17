@@ -2,7 +2,9 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 
 const BUCKET = 'avatars';
-const FETCH_TIMEOUT_MS = 10_000;
+// Generous: several scrape batches can persist thumbnails at the same time,
+// and Instagram's CDN slows down under parallel pulls — 10s aborted many.
+const FETCH_TIMEOUT_MS = 30_000;
 
 /**
  * Copies external avatar images (Instagram/TikTok CDN URLs expire after a

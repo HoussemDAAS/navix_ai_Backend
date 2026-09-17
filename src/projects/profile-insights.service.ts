@@ -1,6 +1,8 @@
 import { Injectable, Logger, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { OpenAIService } from '../embeddings/openai.service';
+import { ScraperService } from '../scraper/scraper.service';
+import { AvatarStorageService } from '../scraper/avatar-storage.service';
 import {
   accountAnalytics,
   DAY_NAMES,
@@ -85,6 +87,8 @@ export class ProfileInsightsService {
   constructor(
     private readonly supabaseService: SupabaseService,
     private readonly openaiService: OpenAIService,
+    private readonly scraperService: ScraperService,
+    private readonly avatarStorage: AvatarStorageService,
   ) {}
 
   /* ── Competitor profile ─────────────────────────────────── */
@@ -156,6 +160,34 @@ export class ProfileInsightsService {
       (p.instagram_handle as string) ??
       (p.tiktok_handle as string) ??
       ((project.instagram_handle as string) || 'you');
+
+    // The dossier must show the user's real identity. If the stored profile
+    // is missing followers/bio/photo, read it from the platform once, persist
+    // the photo to our storage and save everything on the profiles row.
+    const missingIdentity = p.followers_count == null || !p.biography || !p.avatar_url;
+    if (missingIdentity && handle !== 'you') {
+      try {
+        const platform = p.instagram_handle ? 'instagram' : p.tiktok_handle ? 'tiktok' : 'instagram';
+        const fresh = await this.scraperService.scrapeProfile(handle, platform);
+        const avatar = fresh.avatar_url
+          ? ((await this.avatarStorage.persist(fresh.avatar_url, `profiles/${userId}`)) ?? fresh.avatar_url)
+          : ((p.avatar_url as string) ?? null);
+        const patch = {
+          biography: fresh.biography || ((p.biography as string) ?? null),
+          followers_count: fresh.followers_count || ((p.followers_count as number) ?? null),
+          following_count: fresh.following_count || ((p.following_count as number) ?? null),
+          posts_count: fresh.posts_count || ((p.posts_count as number) ?? null),
+          is_verified: fresh.is_verified,
+          avatar_url: avatar,
+        };
+        const { error: upErr } = await client.from('profiles').update(patch).eq('id', userId);
+        if (upErr) this.logger.warn(`Profile identity save failed: ${upErr.message}`);
+        Object.assign(p, patch);
+        this.logger.log(`Refreshed own identity for @${handle}: ${fresh.followers_count} followers`);
+      } catch (err) {
+        this.logger.warn(`Own identity refresh failed for @${handle}: ${(err as Error).message}`);
+      }
+    }
     const stats = accountAnalytics(
       {
         id: null,
