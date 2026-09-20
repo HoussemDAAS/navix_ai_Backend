@@ -36,6 +36,20 @@ interface AiInsightsVerdict {
 
 const INSIGHTS_TTL_MS = 30 * 60 * 1000; // regenerate at most every 30 min
 
+type ProjectPersona = 'ecommerce' | 'agency' | 'creator';
+/**
+ * Projects per account. A creator has exactly one by design (their own brand);
+ * e-commerce and agency accounts get more once paid plans exist.
+ */
+const PROJECT_LIMITS: Record<ProjectPersona, number> = { creator: 1, ecommerce: 1, agency: 1 };
+const DEFAULT_PROJECT_LIMIT = 1;
+
+function projectLimitFor(persona: string | null | undefined): number {
+  return persona && persona in PROJECT_LIMITS
+    ? PROJECT_LIMITS[persona as ProjectPersona]
+    : DEFAULT_PROJECT_LIMIT;
+}
+
 @Injectable()
 export class ProjectsService {
   private readonly logger = new Logger(ProjectsService.name);
@@ -68,7 +82,8 @@ export class ProjectsService {
       throw new BadRequestException('Only Instagram and TikTok profiles can be added for now.');
     }
     const handle = parsed.handle.toLowerCase();
-    const platform = parsed.platform.toUpperCase();
+    // Platforms are stored lower-case everywhere (scraped_content, scrape_jobs, snapshots)
+    const platform = parsed.platform.toLowerCase();
     const client = this.supabaseService.getClient();
 
     const { data: dup } = await client
@@ -178,6 +193,8 @@ export class ProjectsService {
       .from('projects')
       .select('*')
       .eq('user_id', userId)
+      // The primary project always comes first — it is where single-brand accounts land
+      .order('is_primary', { ascending: false })
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -190,6 +207,25 @@ export class ProjectsService {
 
   async createProject(dto: CreateProjectDto, userId: string) {
     const client = this.supabaseService.getClient();
+
+    // Every persona gets one project until paid plans raise the limit. The first
+    // project is the primary one — where single-brand accounts land.
+    const [{ data: profile }, { count }] = await Promise.all([
+      client.from('profiles').select('persona').eq('id', userId).maybeSingle(),
+      client.from('projects').select('id', { count: 'exact', head: true }).eq('user_id', userId),
+    ]);
+    const persona =
+      dto.persona ?? ((profile as { persona: string | null } | null)?.persona ?? null);
+    const existing = count ?? 0;
+    const limit = projectLimitFor(persona);
+    if (existing >= limit) {
+      throw new ForbiddenException(
+        persona === 'creator'
+          ? 'A creator account has one project — your own brand. Switch to a Marketing Agency account to manage several.'
+          : `Your plan includes ${limit} project${limit === 1 ? '' : 's'} for now — adding more clients or stores is coming with paid plans.`,
+      );
+    }
+
     const seedAccounts = (
       await Promise.all((dto.seed_accounts ?? []).map((s) => resolveSeedAccount(s)))
     ).filter((s): s is string => !!s);
@@ -200,7 +236,8 @@ export class ProjectsService {
         name: dto.name,
         niche: dto.niche,
         location: dto.location ?? null,
-        persona: dto.persona ?? null,
+        persona,
+        is_primary: existing === 0,
         facebook_handle: dto.facebook_handle ?? null,
         niche_description: dto.niche_description?.trim() || null,
         keywords: (dto.keywords ?? []).map((k) => k.trim().toLowerCase()).filter(Boolean),
@@ -425,7 +462,7 @@ export class ProjectsService {
     userId: string,
     refresh = false,
   ): Promise<Record<string, unknown>> {
-    await this.getProject(projectId, userId);
+    const project = (await this.getProject(projectId, userId)) as Record<string, unknown>;
 
     const cached = this.insightsCache.get(projectId);
     if (!refresh && cached && Date.now() - cached.ts < INSIGHTS_TTL_MS) {
@@ -487,14 +524,15 @@ export class ProjectsService {
     });
 
     const payload = {
+      // The project is the brand under analysis; the profile only fills legacy gaps.
       me: {
-        name: profile?.full_name ?? profile?.entity_name ?? 'unknown',
-        persona: profile?.persona ?? 'unknown',
-        niche: profile?.niche ?? 'unknown',
-        country: profile?.country ?? 'unknown',
-        bio: profile?.biography ?? null,
-        followers: profile?.followers_count ?? null,
-        posts_count: profile?.posts_count ?? null,
+        name: (project.name as string) || profile?.entity_name || profile?.full_name || 'unknown',
+        persona: profile?.persona ?? (project.persona as string | null) ?? 'unknown',
+        niche: (project.niche as string) || profile?.niche || 'unknown',
+        country: (project.location as string | null) ?? profile?.country ?? 'unknown',
+        bio: (project.biography as string | null) ?? profile?.biography ?? null,
+        followers: (project.followers_count as number | null) ?? profile?.followers_count ?? null,
+        posts_count: (project.posts_count as number | null) ?? profile?.posts_count ?? null,
         recent_posts: myPosts.slice(0, 5).map(snippet),
         posts_scraped: myPosts.length,
       },

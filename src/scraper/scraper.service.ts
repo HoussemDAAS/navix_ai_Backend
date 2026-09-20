@@ -564,7 +564,7 @@ export class ScraperService {
       .select('id, full_name, biography, followers_count')
       .eq('project_id', projectId)
       .eq('handle', handle)
-      .eq('platform', platform)
+      .eq('platform', platform.toLowerCase())
       .maybeSingle();
     const row = (data ?? null) as { id: string; full_name: string | null; biography: string | null; followers_count: number | null } | null;
 

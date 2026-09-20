@@ -63,6 +63,13 @@ interface ProfileMinimal {
   keywords?: string[] | null;
   seed_accounts?: string[] | null;
   has_social_presence?: boolean | null;
+  // The brand's own account as captured during onboarding
+  followers_count?: number | null;
+  following_count?: number | null;
+  posts_count?: number | null;
+  biography?: string | null;
+  avatar_url?: string | null;
+  is_verified?: boolean | null;
 }
 
 interface CompetitorRow {
@@ -76,6 +83,7 @@ const POLL_FALLBACK_DELAY_MS = 60_000; // 60s — if no webhook by then, poll Ap
 const RECONCILE_INTERVAL_MS = 60_000; // sweep for stuck jobs every minute
 const RECONCILE_MIN_AGE_MS = 45_000; // only consider jobs older than this
 const START_TIMEOUT_MS = 15 * 60_000; // queued without a run id → give up
+const SNAPSHOT_SAMPLE_SIZE = 60; // most recent posts averaged into each account snapshot
 
 @Injectable()
 export class ScrapingService implements OnModuleInit, OnModuleDestroy {
@@ -386,6 +394,7 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
         items_embedded: 0,
         completed_at: new Date().toISOString(),
       });
+      await this.recordFreshness(job);
       return;
     }
 
@@ -426,6 +435,7 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
       items_scraped: insertedIds.length,
       completed_at: new Date().toISOString(),
     });
+    await this.recordFreshness(job);
 
     this.logger.log(
       `scrape_job=${scrapeJobId} completed: ${insertedIds.length} content rows inserted`,
@@ -662,6 +672,15 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
         niche_description: profile.niche_description ?? null,
         keywords: profile.keywords ?? [],
         seed_accounts: profile.seed_accounts ?? [],
+        // First project of the account → the one single-brand personas land on
+        is_primary: true,
+        // The brand's own account, as captured during onboarding
+        followers_count: profile.followers_count ?? null,
+        following_count: profile.following_count ?? null,
+        posts_count: profile.posts_count ?? null,
+        biography: profile.biography ?? null,
+        avatar_url: profile.avatar_url ?? null,
+        is_verified: profile.is_verified ?? false,
       })
       .select('id')
       .single();
@@ -674,6 +693,85 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
     const newId = (insertResponse.data as { id: string }).id;
     this.logger.log(`Created onboarding project=${newId} for user=${userId}`);
     return newId;
+  }
+
+  /**
+   * Every completed scrape stamps the account's freshness and appends one
+   * snapshot row — the time series behind growth charts and trend-aware AI.
+   * Never throws: bookkeeping must not fail a scrape that already succeeded.
+   */
+  private async recordFreshness(job: ScrapeJobRow): Promise<void> {
+    const client = this.supabaseService.getClient();
+    const isSelf = job.source_type === 'self';
+    const accountId = isSelf ? job.project_id : job.competitor_id;
+    if (!accountId) return;
+    const table = isSelf ? 'projects' : 'competitors';
+    const capturedAt = new Date().toISOString();
+
+    try {
+      const { error: stampErr } = await client
+        .from(table)
+        .update({ last_scraped_at: capturedAt })
+        .eq('id', accountId);
+      if (stampErr) throw new Error(stampErr.message);
+
+      const { data: account } = await client
+        .from(table)
+        .select('followers_count, following_count, posts_count')
+        .eq('id', accountId)
+        .maybeSingle();
+      const counts = (account ?? null) as {
+        followers_count: number | null;
+        following_count: number | null;
+        posts_count: number | null;
+      } | null;
+
+      let query = client
+        .from('scraped_content')
+        .select('likes_count, comments_count, views_count')
+        .eq('project_id', job.project_id)
+        .eq('source_type', job.source_type)
+        .eq('platform', job.platform);
+      if (!isSelf) query = query.eq('competitor_id', accountId);
+      const { data: posts } = await query
+        .order('published_at', { ascending: false, nullsFirst: false })
+        .limit(SNAPSHOT_SAMPLE_SIZE);
+      const rows = (posts ?? []) as Array<{
+        likes_count: number | null;
+        comments_count: number | null;
+        views_count: number | null;
+      }>;
+
+      const mean = (values: number[]) =>
+        values.length ? values.reduce((sum, v) => sum + v, 0) / values.length : null;
+      const followers = counts?.followers_count ?? null;
+      const avgInteractions = mean(rows.map((r) => (r.likes_count ?? 0) + (r.comments_count ?? 0)));
+      const engagementRate =
+        followers && followers > 0 && avgInteractions != null
+          ? (avgInteractions / followers) * 100
+          : null;
+
+      const { error: snapErr } = await client.from('account_snapshots').insert({
+        project_id: job.project_id,
+        competitor_id: isSelf ? null : accountId,
+        source_type: job.source_type,
+        platform: job.platform,
+        captured_at: capturedAt,
+        followers_count: followers,
+        following_count: counts?.following_count ?? null,
+        posts_count: counts?.posts_count ?? null,
+        posts_sampled: rows.length,
+        avg_likes: mean(rows.map((r) => r.likes_count ?? 0)),
+        avg_comments: mean(rows.map((r) => r.comments_count ?? 0)),
+        avg_views: mean(rows.map((r) => r.views_count ?? 0).filter((v) => v > 0)),
+        engagement_rate: engagementRate,
+      });
+      if (snapErr) throw new Error(snapErr.message);
+    } catch (err) {
+      this.logger.warn(
+        `Freshness bookkeeping failed for ${table}=${accountId}: ${(err as Error).message}`,
+      );
+    }
   }
 
   private async getScrapeJobById(scrapeJobId: string): Promise<ScrapeJobRow> {

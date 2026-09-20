@@ -13,7 +13,7 @@ import {
 /**
  * Deep profile pages: one competitor (or the user's own account) with its real
  * scraped posts, computed stats, and an AI read grounded ONLY in that data.
- * The AI read is cached on the row (competitors.ai_insight / profiles.ai_insight)
+ * The AI read is cached on the row (competitors.ai_insight / projects.ai_insight)
  * so a page view costs nothing; refresh=true regenerates.
  */
 
@@ -155,34 +155,50 @@ export class ProfileInsightsService {
     if (error || !profile) throw new NotFoundException('Profile not found');
     const p = profile as Record<string, unknown>;
 
+    // The project is the brand under analysis, so its own-account data lives on the
+    // project row; the profile only fills gaps left by accounts onboarded before that.
+    const acct: Record<string, unknown> = {
+      instagram_handle: (project.instagram_handle as string | null) ?? (p.instagram_handle as string | null) ?? null,
+      tiktok_handle: (project.tiktok_handle as string | null) ?? (p.tiktok_handle as string | null) ?? null,
+      followers_count: (project.followers_count as number | null) ?? (p.followers_count as number | null) ?? null,
+      following_count: (project.following_count as number | null) ?? (p.following_count as number | null) ?? null,
+      posts_count: (project.posts_count as number | null) ?? (p.posts_count as number | null) ?? null,
+      biography: (project.biography as string | null) || (p.biography as string | null) || null,
+      avatar_url: (project.avatar_url as string | null) || (p.avatar_url as string | null) || null,
+      is_verified: (project.is_verified as boolean | null) ?? (p.is_verified as boolean | null) ?? false,
+      last_scraped_at: (project.last_scraped_at as string | null) ?? null,
+    };
+
     const posts = await this.fetchPosts(projectId, { self: true });
     const handle =
-      (p.instagram_handle as string) ??
-      (p.tiktok_handle as string) ??
-      ((project.instagram_handle as string) || 'you');
+      (acct.instagram_handle as string | null) ?? (acct.tiktok_handle as string | null) ?? 'you';
 
-    // The dossier must show the user's real identity. If the stored profile
-    // is missing followers/bio/photo, read it from the platform once, persist
-    // the photo to our storage and save everything on the profiles row.
-    const missingIdentity = p.followers_count == null || !p.biography || !p.avatar_url;
+    // The dossier must show the brand's real identity. If followers/bio/photo are
+    // missing, read them from the platform once, persist the photo to our storage
+    // and save everything on the project. Single-brand personas also mirror it to
+    // the profile, which the dashboard identity strip still reads.
+    const missingIdentity = acct.followers_count == null || !acct.biography || !acct.avatar_url;
     if (missingIdentity && handle !== 'you') {
       try {
-        const platform = p.instagram_handle ? 'instagram' : p.tiktok_handle ? 'tiktok' : 'instagram';
+        const platform = acct.instagram_handle ? 'instagram' : 'tiktok';
         const fresh = await this.scraperService.scrapeProfile(handle, platform);
         const avatar = fresh.avatar_url
-          ? ((await this.avatarStorage.persist(fresh.avatar_url, `profiles/${userId}`)) ?? fresh.avatar_url)
-          : ((p.avatar_url as string) ?? null);
+          ? ((await this.avatarStorage.persist(fresh.avatar_url, `projects/${projectId}`)) ?? fresh.avatar_url)
+          : ((acct.avatar_url as string | null) ?? null);
         const patch = {
-          biography: fresh.biography || ((p.biography as string) ?? null),
-          followers_count: fresh.followers_count || ((p.followers_count as number) ?? null),
-          following_count: fresh.following_count || ((p.following_count as number) ?? null),
-          posts_count: fresh.posts_count || ((p.posts_count as number) ?? null),
+          biography: fresh.biography || ((acct.biography as string | null) ?? null),
+          followers_count: fresh.followers_count || ((acct.followers_count as number | null) ?? null),
+          following_count: fresh.following_count || ((acct.following_count as number | null) ?? null),
+          posts_count: fresh.posts_count || ((acct.posts_count as number | null) ?? null),
           is_verified: fresh.is_verified,
           avatar_url: avatar,
         };
-        const { error: upErr } = await client.from('profiles').update(patch).eq('id', userId);
-        if (upErr) this.logger.warn(`Profile identity save failed: ${upErr.message}`);
-        Object.assign(p, patch);
+        const { error: upErr } = await client.from('projects').update(patch).eq('id', projectId);
+        if (upErr) this.logger.warn(`Project identity save failed: ${upErr.message}`);
+        if (p.persona !== 'agency') {
+          await client.from('profiles').update(patch).eq('id', userId);
+        }
+        Object.assign(acct, patch);
         this.logger.log(`Refreshed own identity for @${handle}: ${fresh.followers_count} followers`);
       } catch (err) {
         this.logger.warn(`Own identity refresh failed for @${handle}: ${(err as Error).message}`);
@@ -193,29 +209,30 @@ export class ProfileInsightsService {
         id: null,
         handle,
         platform: 'INSTAGRAM',
-        avatar_url: (p.avatar_url as string) ?? null,
-        followers_count: (p.followers_count as number) ?? null,
+        avatar_url: (acct.avatar_url as string) ?? null,
+        followers_count: (acct.followers_count as number) ?? null,
         tracked: false,
       },
       posts,
     );
 
+    const me = { ...p, ...acct };
     const insight = await this.resolveInsight<SelfInsight>({
-      cached: (p.ai_insight as SelfInsight) ?? null,
-      cachedAt: (p.ai_insight_at as string) ?? null,
+      cached: (project.ai_insight as SelfInsight | null) ?? (p.ai_insight as SelfInsight | null) ?? null,
+      cachedAt: (project.ai_insight_at as string | null) ?? (p.ai_insight_at as string | null) ?? null,
       refresh,
       hasData: posts.length > 0,
-      generate: () => this.generateSelfInsight(project, p, stats, posts),
+      generate: () => this.generateSelfInsight(project, me, stats, posts),
       persist: async (value) => {
         await client
-          .from('profiles')
+          .from('projects')
           .update({ ai_insight: value, ai_insight_at: new Date().toISOString() })
-          .eq('id', userId);
+          .eq('id', projectId);
       },
     });
 
     return {
-      profile,
+      profile: me,
       stats,
       posting_days: postingDays(posts),
       posts,

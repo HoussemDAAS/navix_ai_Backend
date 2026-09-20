@@ -220,7 +220,8 @@ export class DiscoveryIngestService {
       return {
         project_id: ctx.projectId,
         handle: c.handle,
-        platform: c.platform,
+        // Candidates are typed 'INSTAGRAM' | 'TIKTOK'; the database is lower-case everywhere
+        platform: c.platform.toLowerCase(),
         full_name: c.full_name,
         biography: c.biography,
         followers_count: c.followers_count,
