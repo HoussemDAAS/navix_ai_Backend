@@ -44,6 +44,7 @@ interface DirectionRow {
   title_pillar: string;
   angle: string;
   format: string;
+  rationale: string | null;
   hook_suggestion: string | null;
   cta_suggestion: string | null;
 }
@@ -73,7 +74,7 @@ export class DraftsService {
     const { data: directions, error: dirError } = await client
       .from('content_directions')
       .select(
-        'id, brief_id, title_pillar, angle, format, hook_suggestion, cta_suggestion, analysis_briefs!inner(project_id)',
+        'id, brief_id, title_pillar, angle, format, rationale, hook_suggestion, cta_suggestion, analysis_briefs!inner(project_id)',
       )
       .in('id', directionIds);
 
@@ -464,6 +465,8 @@ export class DraftsService {
           title_pillar: d.title_pillar,
           angle: d.angle,
           format: d.format,
+          // The AI DirectionData schema requires rationale — never omit it
+          rationale: d.rationale ?? '',
           hook_suggestion: d.hook_suggestion,
           cta_suggestion: d.cta_suggestion,
         }),
