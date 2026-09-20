@@ -12,6 +12,7 @@ import { SupabaseService } from '../supabase/supabase.service';
 import { ApifyService, APIFY_ACTORS } from './apify.service';
 import { EmbeddingsService } from '../embeddings/embeddings.service';
 import { AvatarStorageService } from '../scraper/avatar-storage.service';
+import { ScraperService } from '../scraper/scraper.service';
 import { normalizeScrapedItems } from './content-normalizer';
 import {
   ScrapeSelfDto,
@@ -19,6 +20,14 @@ import {
   SUPPORTED_PLATFORMS,
 } from './dto/scrape-self.dto';
 import { ScrapeCompetitorDto } from './dto/scrape-competitor.dto';
+
+/** Answer of a data refresh request: the scrape itself finishes in the background. */
+export interface RefreshOutcome {
+  started: boolean;
+  reason?: 'too_soon' | 'no_handle' | 'already_running' | 'failed';
+  next_allowed_at?: string | null;
+  scrape_job_ids?: string[];
+}
 
 export interface ScrapeJobRow {
   id: string;
@@ -85,6 +94,22 @@ const RECONCILE_MIN_AGE_MS = 45_000; // only consider jobs older than this
 const START_TIMEOUT_MS = 15 * 60_000; // queued without a run id → give up
 const SNAPSHOT_SAMPLE_SIZE = 60; // most recent posts averaged into each account snapshot
 
+// Data freshness. The sweep runs on boot and every few hours while the backend is up
+// and refreshes only what is older than its threshold — so it behaves the same on a
+// laptop that sleeps at night as on a server. Thresholds are hours, overridable by env.
+const HOURS = 3600_000;
+const envHours = (name: string, fallback: number) => {
+  const value = Number(process.env[name]);
+  return (Number.isFinite(value) && value > 0 ? value : fallback) * HOURS;
+};
+const DATA_REFRESH_ENABLED = process.env.DATA_REFRESH_ENABLED !== 'false';
+const REFRESH_SWEEP_BOOT_DELAY_MS = 90_000;
+const REFRESH_SWEEP_INTERVAL_MS = envHours('DATA_REFRESH_SWEEP_HOURS', 6);
+const SELF_STALE_AFTER_MS = envHours('SELF_REFRESH_HOURS', 24);
+const COMPETITOR_STALE_AFTER_MS = envHours('COMPETITOR_REFRESH_HOURS', 72);
+const MANUAL_REFRESH_COOLDOWN_MS = envHours('MANUAL_REFRESH_COOLDOWN_HOURS', 6);
+const REFRESH_SWEEP_MAX_ACCOUNTS = 12; // per sweep, per kind — protects the Apify quota
+
 @Injectable()
 export class ScrapingService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ScrapingService.name);
@@ -92,12 +117,17 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
   private reconcileTimer: NodeJS.Timeout | null = null;
   private reconciling = false;
 
+  private refreshBootTimer?: ReturnType<typeof setTimeout>;
+  private refreshTimer?: ReturnType<typeof setInterval>;
+  private sweeping = false;
+
   constructor(
     private readonly configService: ConfigService,
     private readonly supabaseService: SupabaseService,
     private readonly apifyService: ApifyService,
     private readonly embeddingsService: EmbeddingsService,
     private readonly avatarStorage: AvatarStorageService,
+    private readonly scraperService: ScraperService,
   ) {
     this.webhookUrl = this.configService.get<string>(
       'APIFY_SCRAPE_WEBHOOK_URL',
@@ -120,10 +150,23 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
       void this.reconcileStuckJobs();
     }, RECONCILE_INTERVAL_MS);
     this.reconcileTimer.unref();
+
+    if (DATA_REFRESH_ENABLED) {
+      this.refreshBootTimer = setTimeout(() => {
+        void this.runDataRefreshSweep();
+      }, REFRESH_SWEEP_BOOT_DELAY_MS);
+      this.refreshBootTimer.unref();
+      this.refreshTimer = setInterval(() => {
+        void this.runDataRefreshSweep();
+      }, REFRESH_SWEEP_INTERVAL_MS);
+      this.refreshTimer.unref();
+    }
   }
 
   onModuleDestroy(): void {
     if (this.reconcileTimer) clearInterval(this.reconcileTimer);
+    if (this.refreshBootTimer) clearTimeout(this.refreshBootTimer);
+    if (this.refreshTimer) clearInterval(this.refreshTimer);
   }
 
   async reconcileStuckJobs(): Promise<void> {
@@ -693,6 +736,246 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
     const newId = (insertResponse.data as { id: string }).id;
     this.logger.log(`Created onboarding project=${newId} for user=${userId}`);
     return newId;
+  }
+
+  /* ── Data freshness ─────────────────────────────────────── */
+
+  /**
+   * Refresh sweep: re-read every account whose data is older than its threshold —
+   * the brand's own account daily, tracked competitors every three days. Untracked
+   * accounts refresh only on demand. Everything goes through the Apify gate.
+   */
+  async runDataRefreshSweep(): Promise<void> {
+    if (this.sweeping) return;
+    this.sweeping = true;
+    const startedAt = Date.now();
+    let selfStarted = 0;
+    let competitorsStarted = 0;
+
+    try {
+      const client = this.supabaseService.getClient();
+
+      const selfCutoff = new Date(Date.now() - SELF_STALE_AFTER_MS).toISOString();
+      const { data: projects } = await client
+        .from('projects')
+        .select('id, user_id')
+        .or('instagram_handle.not.is.null,tiktok_handle.not.is.null')
+        .or(`last_scraped_at.is.null,last_scraped_at.lt.${selfCutoff}`)
+        .order('last_scraped_at', { ascending: true, nullsFirst: true })
+        .limit(REFRESH_SWEEP_MAX_ACCOUNTS);
+      for (const p of (projects ?? []) as Array<{ id: string; user_id: string }>) {
+        const outcome = await this.refreshSelfData(p.id, p.user_id);
+        if (outcome.started) selfStarted++;
+      }
+
+      const competitorCutoff = new Date(Date.now() - COMPETITOR_STALE_AFTER_MS).toISOString();
+      const { data: competitors } = await client
+        .from('competitors')
+        .select('id, project_id, projects!inner(user_id)')
+        .eq('validated_by_user', true)
+        .eq('rejected_by_user', false)
+        .or(`last_scraped_at.is.null,last_scraped_at.lt.${competitorCutoff}`)
+        .order('last_scraped_at', { ascending: true, nullsFirst: true })
+        .limit(REFRESH_SWEEP_MAX_ACCOUNTS);
+      type StaleCompetitor = {
+        id: string;
+        project_id: string;
+        projects: { user_id: string } | Array<{ user_id: string }> | null;
+      };
+      for (const c of (competitors ?? []) as StaleCompetitor[]) {
+        const owner = Array.isArray(c.projects) ? c.projects[0]?.user_id : c.projects?.user_id;
+        if (!owner) continue;
+        const outcome = await this.refreshCompetitorData(c.project_id, c.id, owner);
+        if (outcome.started) competitorsStarted++;
+      }
+
+      // RAG must see the whole corpus, including posts scraped before embeddings existed
+      const { data: allProjects } = await client.from('projects').select('id').limit(50);
+      for (const p of (allProjects ?? []) as Array<{ id: string }>) {
+        await this.embeddingsService.backfillProject(p.id).catch((err) => {
+          this.logger.warn(
+            `Embedding backfill failed for project ${p.id}: ${(err as Error).message}`,
+          );
+        });
+      }
+
+      this.logger.log(
+        `Data refresh sweep: ${selfStarted} own account(s) + ${competitorsStarted} competitor(s) queued in ${Math.round((Date.now() - startedAt) / 1000)}s`,
+      );
+    } catch (err) {
+      this.logger.error(`Data refresh sweep failed: ${(err as Error).message}`);
+    } finally {
+      this.sweeping = false;
+    }
+  }
+
+  /** Re-read the brand's own account: identity first, then its posts. */
+  async refreshSelfData(
+    projectId: string,
+    userId: string,
+    opts: { manual?: boolean; force?: boolean } = {},
+  ): Promise<RefreshOutcome> {
+    await this.assertProjectOwnership(projectId, userId);
+    const client = this.supabaseService.getClient();
+    const { data } = await client
+      .from('projects')
+      .select('id, instagram_handle, tiktok_handle, last_scraped_at, avatar_url')
+      .eq('id', projectId)
+      .maybeSingle();
+    const project = (data ?? null) as {
+      instagram_handle: string | null;
+      tiktok_handle: string | null;
+      last_scraped_at: string | null;
+      avatar_url: string | null;
+    } | null;
+    if (!project) return { started: false, reason: 'failed' };
+
+    const platform: ScrapePlatform = project.instagram_handle ? 'instagram' : 'tiktok';
+    const handle = project.instagram_handle ?? project.tiktok_handle;
+    if (!handle) return { started: false, reason: 'no_handle' };
+
+    const nextAllowedAt = this.cooldownUntil(
+      project.last_scraped_at,
+      opts.manual ? MANUAL_REFRESH_COOLDOWN_MS : SELF_STALE_AFTER_MS,
+    );
+    if (!opts.force && nextAllowedAt) {
+      return { started: false, reason: 'too_soon', next_allowed_at: nextAllowedAt };
+    }
+    if (await this.hasActiveScrape(projectId, 'self', null)) {
+      return { started: false, reason: 'already_running' };
+    }
+
+    await this.refreshIdentity('projects', projectId, handle, platform, project.avatar_url);
+    try {
+      const jobIds = await this.scrapeSelf(projectId, userId, {
+        platforms: [platform],
+        handles: { [platform]: handle },
+      } as ScrapeSelfDto);
+      return { started: true, scrape_job_ids: jobIds };
+    } catch (err) {
+      this.logger.warn(`Own-account refresh failed for project ${projectId}: ${(err as Error).message}`);
+      return { started: false, reason: 'failed' };
+    }
+  }
+
+  /** Re-read one competitor: identity first, then its posts. */
+  async refreshCompetitorData(
+    projectId: string,
+    competitorId: string,
+    userId: string,
+    opts: { manual?: boolean; force?: boolean } = {},
+  ): Promise<RefreshOutcome> {
+    await this.assertProjectOwnership(projectId, userId);
+    const client = this.supabaseService.getClient();
+    const { data } = await client
+      .from('competitors')
+      .select('id, handle, platform, last_scraped_at, avatar_url')
+      .eq('id', competitorId)
+      .eq('project_id', projectId)
+      .maybeSingle();
+    const competitor = (data ?? null) as {
+      handle: string;
+      platform: string | null;
+      last_scraped_at: string | null;
+      avatar_url: string | null;
+    } | null;
+    if (!competitor) return { started: false, reason: 'failed' };
+
+    const platform = (competitor.platform || 'instagram').toLowerCase() as ScrapePlatform;
+    const nextAllowedAt = this.cooldownUntil(
+      competitor.last_scraped_at,
+      opts.manual ? MANUAL_REFRESH_COOLDOWN_MS : COMPETITOR_STALE_AFTER_MS,
+    );
+    if (!opts.force && nextAllowedAt) {
+      return { started: false, reason: 'too_soon', next_allowed_at: nextAllowedAt };
+    }
+    if (await this.hasActiveScrape(projectId, 'competitor', competitorId)) {
+      return { started: false, reason: 'already_running' };
+    }
+
+    await this.refreshIdentity('competitors', competitorId, competitor.handle, platform, competitor.avatar_url);
+    try {
+      const jobIds = await this.scrapeCompetitor(
+        projectId,
+        competitorId,
+        userId,
+        {} as ScrapeCompetitorDto,
+      );
+      return { started: true, scrape_job_ids: jobIds };
+    } catch (err) {
+      this.logger.warn(
+        `Competitor refresh failed for competitor ${competitorId}: ${(err as Error).message}`,
+      );
+      return { started: false, reason: 'failed' };
+    }
+  }
+
+  private cooldownUntil(lastScrapedAt: string | null, windowMs: number): string | null {
+    if (!lastScrapedAt) return null;
+    const next = new Date(lastScrapedAt).getTime() + windowMs;
+    return next > Date.now() ? new Date(next).toISOString() : null;
+  }
+
+  private async hasActiveScrape(
+    projectId: string,
+    sourceType: 'self' | 'competitor',
+    competitorId: string | null,
+  ): Promise<boolean> {
+    const client = this.supabaseService.getClient();
+    // Older queued/running rows are stuck ones the reconciler will close — not a reason to wait
+    const since = new Date(Date.now() - START_TIMEOUT_MS).toISOString();
+    let query = client
+      .from('scrape_jobs')
+      .select('id', { count: 'exact', head: true })
+      .eq('project_id', projectId)
+      .eq('source_type', sourceType)
+      .in('status', ['queued', 'running'])
+      .gte('created_at', since);
+    if (competitorId) query = query.eq('competitor_id', competitorId);
+    const { count } = await query;
+    return (count ?? 0) > 0;
+  }
+
+  /**
+   * Followers, bio and verification move, and the posts scrape does not carry
+   * them — so the profile is read first and the snapshot taken at completion
+   * sees current numbers. Never throws.
+   */
+  private async refreshIdentity(
+    table: 'projects' | 'competitors',
+    id: string,
+    handle: string,
+    platform: ScrapePlatform,
+    currentAvatar: string | null,
+  ): Promise<void> {
+    if (platform !== 'instagram' && platform !== 'tiktok') return;
+    try {
+      const fresh = await this.scraperService.scrapeProfile(handle, platform);
+      const patch: Record<string, unknown> = {
+        followers_count: fresh.followers_count || null,
+        following_count: fresh.following_count || null,
+        posts_count: fresh.posts_count || null,
+        is_verified: fresh.is_verified,
+      };
+      if (fresh.biography) patch.biography = fresh.biography;
+      if (fresh.full_name && table === 'competitors') patch.full_name = fresh.full_name;
+      // Avatars are copied into our storage once — CDN links expire, ours do not
+      const alreadyStored = !!currentAvatar && currentAvatar.includes('/storage/v1/');
+      if (fresh.avatar_url && !alreadyStored) {
+        const stored = await this.avatarStorage.persist(fresh.avatar_url, `${table}/${id}`);
+        if (stored) patch.avatar_url = stored;
+      }
+      const { error } = await this.supabaseService
+        .getClient()
+        .from(table)
+        .update(patch)
+        .eq('id', id);
+      if (error) throw new Error(error.message);
+    } catch (err) {
+      this.logger.warn(
+        `Identity refresh failed for ${table}=${id} (@${handle}): ${(err as Error).message}`,
+      );
+    }
   }
 
   /**

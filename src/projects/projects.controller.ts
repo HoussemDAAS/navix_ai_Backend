@@ -19,6 +19,8 @@ import { UpdateCompetitorDto } from './dto/update-competitor.dto';
 import { AddCompetitorDto } from './dto/add-competitor.dto';
 import { SupabaseAuthGuard } from '../auth/supabase-auth.guard';
 import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
+import { ScrapingService } from '../scraping/scraping.service';
+import { EmbeddingsService } from '../embeddings/embeddings.service';
 
 @Controller('projects')
 @UseGuards(SupabaseAuthGuard)
@@ -26,6 +28,8 @@ export class ProjectsController {
   constructor(
     private readonly projectsService: ProjectsService,
     private readonly profileInsightsService: ProfileInsightsService,
+    private readonly scrapingService: ScrapingService,
+    private readonly embeddingsService: EmbeddingsService,
   ) {}
 
   @Get()
@@ -164,6 +168,42 @@ export class ProjectsController {
   ) {
     const data = await this.profileInsightsService.getSelfProfile(id, user.id, refresh === 'true');
     return { message: 'Profile retrieved successfully', data };
+  }
+
+  /** Manual data refresh of the brand's own account (cooldown applies). */
+  @Post(':id/refresh')
+  @HttpCode(HttpStatus.ACCEPTED)
+  async refreshProjectData(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+  ) {
+    const data = await this.scrapingService.refreshSelfData(id, user.id, { manual: true });
+    return { message: data.started ? 'Refresh started' : 'Refresh not started', data };
+  }
+
+  /** Manual data refresh of one competitor (cooldown applies). */
+  @Post(':id/competitors/:competitorId/refresh')
+  @HttpCode(HttpStatus.ACCEPTED)
+  async refreshCompetitorData(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('competitorId', ParseUUIDPipe) competitorId: string,
+    @CurrentUser() user: AuthUser,
+  ) {
+    const data = await this.scrapingService.refreshCompetitorData(id, competitorId, user.id, {
+      manual: true,
+    });
+    return { message: data.started ? 'Refresh started' : 'Refresh not started', data };
+  }
+
+  /** Embed every captioned post that has no embedding yet (RAG coverage). */
+  @Post(':id/embeddings/backfill')
+  async backfillEmbeddings(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+  ) {
+    await this.projectsService.getProject(id, user.id);
+    const data = await this.embeddingsService.backfillProject(id);
+    return { message: 'Embedding backfill complete', data };
   }
 
   @Patch(':id/competitors/:competitorId')

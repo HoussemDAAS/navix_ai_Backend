@@ -144,6 +144,38 @@ export class EmbeddingsService {
   /**
    * Embed a brand kit document. Useful for grounding the agent in user's brand voice.
    */
+  /**
+   * Embed every captioned post of a project that has no embedding yet, so RAG
+   * retrieval sees the whole corpus. Cheap when nothing is missing; run by the
+   * data-refresh sweep and on demand.
+   */
+  async backfillProject(projectId: string): Promise<{ missing: number; chunks: number }> {
+    const client = this.supabaseService.getClient();
+    const [{ data: posts, error: postsErr }, { data: done, error: doneErr }] = await Promise.all([
+      client.from('scraped_content').select('id, caption').eq('project_id', projectId).limit(5000),
+      client
+        .from('embeddings')
+        .select('scraped_content_id')
+        .eq('project_id', projectId)
+        .not('scraped_content_id', 'is', null)
+        .limit(5000),
+    ]);
+    if (postsErr) throw new Error(`Failed to list posts for backfill: ${postsErr.message}`);
+    if (doneErr) throw new Error(`Failed to list embeddings for backfill: ${doneErr.message}`);
+
+    const embedded = new Set(
+      ((done ?? []) as Array<{ scraped_content_id: string }>).map((r) => r.scraped_content_id),
+    );
+    const missing = ((posts ?? []) as Array<{ id: string; caption: string | null }>)
+      .filter((p) => (p.caption ?? '').trim().length > 0 && !embedded.has(p.id))
+      .map((p) => p.id);
+
+    if (missing.length === 0) return { missing: 0, chunks: 0 };
+    this.logger.log(`Backfilling embeddings for ${missing.length} posts in project ${projectId}`);
+    const chunks = await this.embedScrapedContentBatch(missing);
+    return { missing: missing.length, chunks };
+  }
+
   async embedBrandKit(
     projectId: string,
     brandKit: Record<string, unknown>,
