@@ -13,6 +13,7 @@ import { EmbeddingsModule } from './embeddings/embeddings.module';
 import { DirectionsModule } from './directions/directions.module';
 import { DraftsModule } from './drafts/drafts.module';
 import { CalendarModule } from './calendar/calendar.module';
+import { StudioModule } from './studio/studio.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { CalendarModule } from './calendar/calendar.module';
     DirectionsModule,
     DraftsModule,
     CalendarModule,
+    StudioModule,
   ],
 })
 export class AppModule {}
