@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { JobsService, JobRecord } from '../jobs/jobs.service';
+import { AnalyticsService } from '../analysis/analytics.service';
 import {
   AiService,
   DraftGenerationDirectionPayload,
@@ -59,6 +60,7 @@ export class DraftsService {
     private readonly supabaseService: SupabaseService,
     private readonly jobsService: JobsService,
     private readonly aiService: AiService,
+    private readonly analyticsService: AnalyticsService,
   ) {}
 
   async generateDrafts(
@@ -472,11 +474,13 @@ export class DraftsService {
         }),
       );
 
+      const grounding = await this.analyticsService.groundingFor(projectId);
       const result: DraftGenerationResponse =
         await this.aiService.generateDrafts({
           project_id: projectId,
           directions: payload,
           brand_kit: brandKit ?? {},
+          ...grounding,
         });
 
       const incoming = Array.isArray(result?.drafts) ? result.drafts : [];

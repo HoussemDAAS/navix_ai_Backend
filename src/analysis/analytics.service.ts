@@ -178,6 +178,40 @@ export class AnalyticsService {
 
   constructor(private readonly supabaseService: SupabaseService) {}
 
+  /**
+   * Who the account is (persona) and what its numbers say (field analytics) —
+   * the grounding every AI agent receives with its request. Never throws: a
+   * missing model degrades the prompt, it must not fail the job.
+   */
+  async groundingFor(projectId: string): Promise<{
+    persona: string | null;
+    account_model: Record<string, unknown> | null;
+  }> {
+    const client = this.supabaseService.getClient();
+    try {
+      const { data: project } = await client
+        .from('projects')
+        .select('user_id, persona')
+        .eq('id', projectId)
+        .maybeSingle();
+      const row = (project ?? null) as { user_id: string; persona: string | null } | null;
+      if (!row) return { persona: null, account_model: null };
+
+      const { data: profile } = await client
+        .from('profiles')
+        .select('persona')
+        .eq('id', row.user_id)
+        .maybeSingle();
+      const persona =
+        ((profile ?? null) as { persona: string | null } | null)?.persona ?? row.persona ?? null;
+
+      const model = await this.getFieldAnalytics(projectId, row.user_id).catch(() => null);
+      return { persona, account_model: model as unknown as Record<string, unknown> | null };
+    } catch {
+      return { persona: null, account_model: null };
+    }
+  }
+
   async getFieldAnalytics(projectId: string, userId: string): Promise<FieldAnalytics> {
     const client = this.supabaseService.getClient();
 

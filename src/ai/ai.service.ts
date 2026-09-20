@@ -1,7 +1,15 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
-export interface MarketAnalysisInput {
+/** Who the account is and what its numbers say — appended to every agent's system prompt. */
+export interface AgentGrounding {
+  /** Account type chosen at signup: creator | ecommerce | agency */
+  persona?: string | null;
+  /** Field analytics computed from scraped posts (self vs field) */
+  account_model?: Record<string, unknown> | null;
+}
+
+export interface MarketAnalysisInput extends AgentGrounding {
   project_id: string;
   competitors: Record<string, unknown>[];
   signals: Record<string, unknown>[];
@@ -9,7 +17,7 @@ export interface MarketAnalysisInput {
   brand_kit: Record<string, unknown>;
 }
 
-export interface DirectionGenerationInput {
+export interface DirectionGenerationInput extends AgentGrounding {
   project_id: string;
   brief_id: string;
   brand_kit: Record<string, unknown>;
@@ -37,7 +45,7 @@ export interface DraftGenerationDirectionPayload {
   cta_suggestion?: string | null;
 }
 
-export interface DraftGenerationInput {
+export interface DraftGenerationInput extends AgentGrounding {
   project_id: string;
   directions: DraftGenerationDirectionPayload[];
   brand_kit: Record<string, unknown>;

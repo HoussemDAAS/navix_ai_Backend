@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { JobsService, JobRecord } from '../jobs/jobs.service';
+import { AnalyticsService } from '../analysis/analytics.service';
 import { AiService, DirectionGenerationResponse } from '../ai/ai.service';
 import { UpdateDirectionDto } from './dto/update-direction.dto';
 
@@ -38,6 +39,7 @@ export class DirectionsService {
     private readonly supabaseService: SupabaseService,
     private readonly jobsService: JobsService,
     private readonly aiService: AiService,
+    private readonly analyticsService: AnalyticsService,
   ) {}
 
   async generateDirections(
@@ -280,6 +282,7 @@ export class DirectionsService {
       );
       await this.jobsService.setActive(jobId);
 
+      const grounding = await this.analyticsService.groundingFor(projectId);
       const result: DirectionGenerationResponse =
         await this.aiService.generateDirections({
           project_id: projectId,
@@ -287,6 +290,7 @@ export class DirectionsService {
           brand_kit: brandKit ?? {},
           analysis: brief as unknown as Record<string, unknown>,
           num_directions: numDirections,
+          ...grounding,
         });
 
       const incoming = Array.isArray(result?.directions)

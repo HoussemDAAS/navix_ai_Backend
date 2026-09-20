@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { JobsService, JobRecord } from '../jobs/jobs.service';
+import { AnalyticsService } from './analytics.service';
 import { AiService } from '../ai/ai.service';
 
 /** What the AI service returns and what we persist in analysis_briefs */
@@ -25,6 +26,7 @@ export class AnalysisService {
     private readonly supabaseService: SupabaseService,
     private readonly jobsService: JobsService,
     private readonly aiService: AiService,
+    private readonly analyticsService: AnalyticsService,
   ) {}
 
   async runAnalysis(projectId: string, userId: string): Promise<JobRecord> {
@@ -190,11 +192,14 @@ export class AnalysisService {
       });
       // Call AI service — project_id is required by AnalysisRequest, and
       // brand_kit must be an object (all fields optional), never null.
+      // Persona + computed field numbers ground the agent in this account, not generic advice
+      const grounding = await this.analyticsService.groundingFor(projectId);
       const result = await this.aiService.runMarketAnalysis({
         project_id: projectId,
         competitors,
         signals,
         brand_kit: brandKit ?? {},
+        ...grounding,
       });
       const brief = this.toBrief(result);
 
