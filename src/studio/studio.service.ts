@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AnalyticsService } from '../analysis/analytics.service';
 import { EmbeddingsService } from '../embeddings/embeddings.service';
+import { ScraperService, type ScrapedPost } from '../scraper/scraper.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 
@@ -126,6 +127,7 @@ export class StudioService {
     private readonly supabaseService: SupabaseService,
     private readonly analyticsService: AnalyticsService,
     private readonly embeddingsService: EmbeddingsService,
+    private readonly scraperService: ScraperService,
     private readonly configService: ConfigService,
   ) {
     this.aiBaseUrl = this.configService.get<string>('AI_SERVICE_URL') ?? 'http://localhost:8000';
@@ -279,9 +281,107 @@ export class StudioService {
     }
   }
 
+  /**
+   * A public Instagram/TikTok post by link: the scrapers read caption, metrics and
+   * the video; the AI service transcribes and briefs it. Same lifecycle as uploads.
+   */
+  async addLinkReference(
+    projectId: string,
+    sessionId: string,
+    userId: string,
+    url: string,
+  ): Promise<ReferenceRow> {
+    await this.ownProject(projectId, userId);
+    await this.loadSession(projectId, sessionId);
+    const clean = url.trim();
+    const platform = /tiktok\.com/i.test(clean) ? 'TikTok' : /instagram\.com/i.test(clean) ? 'Instagram' : null;
+    if (!platform) {
+      throw new BadRequestException('Paste a link to an Instagram post/reel or a TikTok video.');
+    }
+
+    const client = this.supabaseService.getClient();
+    const { data: inserted, error: insertErr } = await client
+      .from('references')
+      .insert({
+        project_id: projectId,
+        session_id: sessionId,
+        kind: 'link',
+        title: `${platform} post`,
+        source_url: clean,
+        status: 'processing',
+      })
+      .select('*')
+      .single();
+    if (insertErr || !inserted) throw new Error(insertErr?.message ?? 'Could not save the reference');
+    const row = inserted as ReferenceRow;
+
+    try {
+      const post: ScrapedPost = await this.scraperService.scrapePost(clean);
+      const metrics = [
+        post.views != null ? `${post.views} views` : null,
+        post.likes != null ? `${post.likes} likes` : null,
+        post.comments != null ? `${post.comments} comments` : null,
+        post.shares != null ? `${post.shares} shares` : null,
+        post.duration_seconds != null ? `${Math.round(post.duration_seconds)} s` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      const text = [
+        `${platform} post by @${post.author ?? 'unknown'} — ${post.post_url}`,
+        metrics ? `Metrics: ${metrics}` : null,
+        `Caption: ${post.caption || '(no caption)'}`,
+      ]
+        .filter(Boolean)
+        .join('\n');
+      const title = `@${post.author ?? 'unknown'} · ${platform} ${post.video_url ? 'video' : 'post'}`;
+
+      const extracted = await this.extractReference(row, post.video_url ?? clean, {
+        text,
+        video_url: post.video_url,
+      });
+      const { data: ready } = await client
+        .from('references')
+        .update({
+          title,
+          status: 'ready',
+          extracted_text: extracted.extracted_text,
+          summary: extracted.summary,
+          meta: {
+            ...(extracted.meta ?? {}),
+            platform: post.platform,
+            author: post.author,
+            likes: post.likes,
+            comments: post.comments,
+            views: post.views,
+            shares: post.shares,
+            duration_seconds: post.duration_seconds,
+            thumbnail_url: post.thumbnail_url,
+          },
+        })
+        .eq('id', row.id)
+        .select('*')
+        .single();
+      this.embeddingsService.embedReference(row.id).catch((err) => {
+        this.logger.warn(`Reference ${row.id} not embedded: ${(err as Error).message}`);
+      });
+      return (ready ?? { ...row, title, status: 'ready', ...extracted }) as ReferenceRow;
+    } catch (err) {
+      const message = (err as Error).message;
+      this.logger.warn(`Link reference ${row.id} failed: ${message}`);
+      const { data: failed } = await client
+        .from('references')
+        .update({ status: 'failed', error: message.slice(0, 500) })
+        .eq('id', row.id)
+        .select('*')
+        .single();
+      return (failed ?? { ...row, status: 'failed', error: message }) as ReferenceRow;
+    }
+  }
+
   private async extractReference(
     row: ReferenceRow,
     url: string,
+    extra: { text?: string | null; video_url?: string | null } = {},
   ): Promise<{ extracted_text: string; summary: string; meta: Record<string, unknown> }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), EXTRACT_TIMEOUT_MS);
@@ -295,6 +395,8 @@ export class StudioService {
           url,
           mime_type: row.mime_type,
           title: row.title,
+          text: extra.text ?? null,
+          video_url: extra.video_url ?? null,
         }),
         signal: controller.signal,
       });

@@ -18,6 +18,7 @@ import type { Response } from 'express';
 import { StudioService, type StudioEvent, type StudioUpload } from './studio.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { SendMessageDto } from './dto/send-message.dto';
+import { AddLinkDto } from './dto/add-link.dto';
 import { SupabaseAuthGuard } from '../auth/supabase-auth.guard';
 import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
 
@@ -77,6 +78,19 @@ export class StudioController {
   ) {
     if (!file) throw new BadRequestException('No file received');
     const data = await this.studioService.uploadReference(id, sessionId, user.id, file);
+    return { message: data.status === 'ready' ? 'Reference ready' : 'Reference could not be read', data };
+  }
+
+  /** A public Instagram/TikTok post by link; answers once caption, metrics and transcript are in. */
+  @Post('sessions/:sessionId/references/link')
+  @HttpCode(HttpStatus.CREATED)
+  async addLinkReference(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('sessionId', ParseUUIDPipe) sessionId: string,
+    @CurrentUser() user: AuthUser,
+    @Body() dto: AddLinkDto,
+  ) {
+    const data = await this.studioService.addLinkReference(id, sessionId, user.id, dto.url);
     return { message: data.status === 'ready' ? 'Reference ready' : 'Reference could not be read', data };
   }
 

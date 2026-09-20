@@ -52,6 +52,21 @@ export interface RunInfo {
 }
 
 /** Normalized profile data returned by scrapeProfile */
+/** A single public post read by URL (Studio references). */
+export interface ScrapedPost {
+  platform: 'instagram' | 'tiktok';
+  post_url: string;
+  author: string | null;
+  caption: string;
+  likes: number | null;
+  comments: number | null;
+  views: number | null;
+  shares: number | null;
+  duration_seconds: number | null;
+  video_url: string | null;
+  thumbnail_url: string | null;
+}
+
 export interface ScrapedProfile {
   handle: string;
   platform: string;
@@ -871,6 +886,72 @@ export class ScraperService {
       default:
         throw new BadRequestException(`Platform "${platform}" is not yet supported for profile scraping`);
     }
+  }
+
+  /**
+   * One public post by URL (Instagram post/reel or TikTok video): caption, metrics,
+   * author and a downloadable video URL when there is one. Used by Studio references.
+   */
+  async scrapePost(url: string): Promise<ScrapedPost> {
+    const clean = url.trim();
+    const isTikTok = /tiktok\.com/i.test(clean);
+    const isInstagram = /instagram\.com\/(p|reel|reels|tv)\//i.test(clean);
+    if (!isTikTok && !isInstagram) {
+      throw new BadRequestException('Paste a link to an Instagram post/reel or a TikTok video.');
+    }
+
+    if (isTikTok) {
+      const items = await this.apify.items('TT Post', 'clockworks/tiktok-scraper', {
+        postURLs: [clean],
+        resultsPerPage: 1,
+        shouldDownloadVideos: true,
+        shouldDownloadCovers: false,
+        shouldDownloadSubtitles: false,
+        shouldDownloadSlideshowImages: false,
+      });
+      const raw = (items[0] ?? null) as Record<string, unknown> | null;
+      if (!raw) throw new BadRequestException('That TikTok video could not be read (private or removed?).');
+      const author = raw.authorMeta as { name?: string; nickName?: string } | undefined;
+      const videoMeta = raw.videoMeta as { duration?: number; downloadAddr?: string; coverUrl?: string } | undefined;
+      const media = raw.mediaUrls as string[] | undefined;
+      return {
+        platform: 'tiktok',
+        post_url: (raw.webVideoUrl as string) || clean,
+        author: author?.name ?? null,
+        caption: (raw.text as string) ?? '',
+        likes: (raw.diggCount as number) ?? null,
+        comments: (raw.commentCount as number) ?? null,
+        views: (raw.playCount as number) ?? null,
+        shares: (raw.shareCount as number) ?? null,
+        duration_seconds: videoMeta?.duration ?? null,
+        video_url: media?.[0] ?? videoMeta?.downloadAddr ?? null,
+        thumbnail_url: videoMeta?.coverUrl ?? null,
+      };
+    }
+
+    const items = await this.apify.items('IG Post', 'apify/instagram-scraper', {
+      directUrls: [clean],
+      resultsType: 'posts',
+      resultsLimit: 1,
+      addParentData: false,
+    });
+    const raw = (items[0] ?? null) as Record<string, unknown> | null;
+    if (!raw || (raw.error as string | undefined)) {
+      throw new BadRequestException('That Instagram post could not be read (private or removed?).');
+    }
+    return {
+      platform: 'instagram',
+      post_url: (raw.url as string) || clean,
+      author: (raw.ownerUsername as string) ?? null,
+      caption: (raw.caption as string) ?? '',
+      likes: (raw.likesCount as number) ?? null,
+      comments: (raw.commentsCount as number) ?? null,
+      views: ((raw.videoPlayCount ?? raw.videoViewCount) as number | undefined) ?? null,
+      shares: null,
+      duration_seconds: (raw.videoDuration as number) ?? null,
+      video_url: (raw.videoUrl as string) ?? null,
+      thumbnail_url: (raw.displayUrl as string) ?? null,
+    };
   }
 
   private async scrapeInstagramProfile(handle: string): Promise<ScrapedProfile> {
