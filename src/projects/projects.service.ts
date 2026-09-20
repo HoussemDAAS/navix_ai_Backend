@@ -11,6 +11,7 @@ import { OpenAIService } from '../embeddings/openai.service';
 import { ScraperService } from '../scraper/scraper.service';
 import { AvatarStorageService } from '../scraper/avatar-storage.service';
 import { JobsService } from '../jobs/jobs.service';
+import { AiService } from '../ai/ai.service';
 import { resolveSeedAccount, resolveSocialLink } from '../common/social-links';
 
 export interface DiscoveryStatus {
@@ -50,6 +51,18 @@ function projectLimitFor(persona: string | null | undefined): number {
     : DEFAULT_PROJECT_LIMIT;
 }
 
+/** The brand-kit page's fixed voice tiles — the AI must answer with one of these. */
+const TONE_OPTIONS = ['Professional', 'Casual', 'Playful', 'Bold', 'Inspirational', 'Educational'];
+const FORMALITY_OPTIONS = ['Very Formal', 'Formal', 'Neutral', 'Informal', 'Very Informal'];
+const BRAND_KIT_TEXT_FIELDS = [
+  'tone_of_voice',
+  'formality_level',
+  'target_audience',
+  'objective',
+  'vocab_exclude',
+  'preferred_cta',
+] as const;
+
 @Injectable()
 export class ProjectsService {
   private readonly logger = new Logger(ProjectsService.name);
@@ -65,6 +78,7 @@ export class ProjectsService {
     private readonly scraperService: ScraperService,
     private readonly avatarStorage: AvatarStorageService,
     private readonly jobsService: JobsService,
+    private readonly aiService: AiService,
   ) {}
 
   /**
@@ -333,6 +347,124 @@ export class ProjectsService {
 
     this.logger.log(`Brand kit saved for project: ${projectId}`);
     return data;
+  }
+
+  /**
+   * Read the brand kit off the account's own posts: tone, formality, audience,
+   * objective, CTA and the rules it visibly follows. Fills empty fields, or
+   * everything with overwrite=true; the user can still edit and save.
+   */
+  async autofillBrandKit(projectId: string, userId: string, overwrite = false) {
+    const project = (await this.getProject(projectId, userId)) as Record<string, unknown>;
+    const client = this.supabaseService.getClient();
+
+    const [{ data: posts }, { data: profileRow }, existing] = await Promise.all([
+      client
+        .from('scraped_content')
+        .select('caption, likes_count, comments_count, views_count, content_type, hashtags, published_at')
+        .eq('project_id', projectId)
+        .eq('source_type', 'self')
+        .order('published_at', { ascending: false, nullsFirst: false })
+        .limit(80),
+      client
+        .from('profiles')
+        .select('persona, full_name, entity_name, niche')
+        .eq('id', userId)
+        .maybeSingle(),
+      this.getBrandKit(projectId, userId),
+    ]);
+
+    type PostRow = {
+      caption: string | null;
+      likes_count: number | null;
+      comments_count: number | null;
+      views_count: number | null;
+      content_type: string | null;
+      hashtags: string[] | null;
+      published_at: string | null;
+    };
+    const profile = (profileRow ?? null) as {
+      persona: string | null;
+      full_name: string | null;
+      entity_name: string | null;
+      niche: string | null;
+    } | null;
+
+    const captioned = ((posts ?? []) as PostRow[]).filter(
+      (p) => (p.caption ?? '').trim().length > 0,
+    );
+    if (captioned.length < 3) {
+      throw new BadRequestException(
+        'Navix needs at least 3 of your posts with captions to read your voice — refresh your data first.',
+      );
+    }
+    // Recent posts carry the current voice; the best performers show what the audience rewards
+    const recent = captioned.slice(0, 30);
+    const best = [...captioned]
+      .sort(
+        (a, b) =>
+          (b.likes_count ?? 0) + (b.comments_count ?? 0) - ((a.likes_count ?? 0) + (a.comments_count ?? 0)),
+      )
+      .slice(0, 10);
+    const sample = [...new Set([...recent, ...best])];
+
+    const derived = await this.aiService.deriveBrandKit({
+      project_id: projectId,
+      persona: profile?.persona ?? (project.persona as string | null) ?? null,
+      profile: {
+        name: (project.name as string) || profile?.entity_name || profile?.full_name || null,
+        bio: (project.biography as string | null) ?? null,
+        niche: (project.niche as string) || profile?.niche || null,
+      },
+      posts: sample.map((p) => ({
+        caption: (p.caption as string).trim(),
+        likes: p.likes_count,
+        comments: p.comments_count,
+        views: p.views_count,
+        format: p.content_type,
+        hashtags: p.hashtags ?? [],
+        published_at: p.published_at,
+      })),
+      tone_options: TONE_OPTIONS,
+      formality_options: FORMALITY_OPTIONS,
+    });
+
+    const current = (existing ?? {}) as Record<string, unknown>;
+    const patch: CreateBrandKitDto = {};
+    const filled: string[] = [];
+    for (const key of BRAND_KIT_TEXT_FIELDS) {
+      const value = derived[key];
+      if (typeof value === 'string' && value.trim() && (overwrite || !current[key])) {
+        patch[key] = value.trim();
+        filled.push(key);
+      }
+    }
+    const currentConstraints = Array.isArray(current.constraints)
+      ? (current.constraints as string[])
+      : [];
+    if (
+      Array.isArray(derived.constraints) &&
+      derived.constraints.length > 0 &&
+      (overwrite || currentConstraints.length === 0)
+    ) {
+      patch.constraints = derived.constraints
+        .map((c) => String(c).trim())
+        .filter(Boolean)
+        .slice(0, 8);
+      filled.push('constraints');
+    }
+
+    const kit = filled.length > 0 ? await this.saveBrandKit(projectId, patch, userId) : existing;
+    this.logger.log(
+      `Brand kit auto-filled for project ${projectId}: ${filled.join(', ') || 'nothing new'} (from ${sample.length} posts)`,
+    );
+    return {
+      kit,
+      filled_fields: filled,
+      posts_used: sample.length,
+      evidence: derived.evidence ?? [],
+      confidence: derived.confidence ?? null,
+    };
   }
 
   async getCompetitors(projectId: string, userId: string) {

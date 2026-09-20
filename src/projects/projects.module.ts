@@ -7,9 +7,10 @@ import { ScrapingModule } from '../scraping/scraping.module';
 import { EmbeddingsModule } from '../embeddings/embeddings.module';
 import { ScraperModule } from '../scraper/scraper.module';
 import { JobsModule } from '../jobs/jobs.module';
+import { AiModule } from '../ai/ai.module';
 
 @Module({
-  imports: [SupabaseModule, ScrapingModule, EmbeddingsModule, ScraperModule, JobsModule],
+  imports: [SupabaseModule, ScrapingModule, EmbeddingsModule, ScraperModule, JobsModule, AiModule],
   controllers: [ProjectsController],
   providers: [ProjectsService, ProfileInsightsService],
   exports: [ProjectsService],

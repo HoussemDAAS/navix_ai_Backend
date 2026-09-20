@@ -71,11 +71,42 @@ export interface BrandMemoryResponse {
   learned_patterns?: string[];
 }
 
+export interface BrandKitDeriveInput {
+  project_id: string;
+  persona: string | null;
+  profile: { name: string | null; bio: string | null; niche: string | null };
+  posts: Array<{
+    caption: string;
+    likes: number | null;
+    comments: number | null;
+    views: number | null;
+    format: string | null;
+    hashtags: string[];
+    published_at: string | null;
+  }>;
+  /** The UI's fixed voice tiles — the model must answer with one of these */
+  tone_options: string[];
+  formality_options: string[];
+}
+
+export interface BrandKitDeriveResponse {
+  tone_of_voice?: string | null;
+  formality_level?: string | null;
+  target_audience?: string | null;
+  objective?: string | null;
+  preferred_cta?: string | null;
+  vocab_exclude?: string | null;
+  constraints?: string[];
+  evidence?: string[];
+  confidence?: number | null;
+}
+
 type AiRequestBody =
   | MarketAnalysisInput
   | DirectionGenerationInput
   | DraftGenerationInput
-  | BrandMemoryInput;
+  | BrandMemoryInput
+  | BrandKitDeriveInput;
 
 @Injectable()
 export class AiService {
@@ -118,6 +149,12 @@ export class AiService {
   ): Promise<BrandMemoryResponse> {
     const result = await this.callEndpoint('/agents/brand-memory', data);
     return result as unknown as BrandMemoryResponse;
+  }
+
+  /** Read a brand kit off the account's own posts. */
+  async deriveBrandKit(data: BrandKitDeriveInput): Promise<BrandKitDeriveResponse> {
+    const result = await this.callEndpoint('/agents/brand-kit-derive', data);
+    return result as unknown as BrandKitDeriveResponse;
   }
 
   private async callEndpoint(

@@ -206,6 +206,17 @@ export class ProjectsController {
     return { message: 'Embedding backfill complete', data };
   }
 
+  /** Derive the brand kit from the account's own posts (fills empty fields; ?overwrite=true replaces). */
+  @Post(':id/brand-kit/autofill')
+  async autofillBrandKit(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+    @Query('overwrite') overwrite?: string,
+  ) {
+    const data = await this.projectsService.autofillBrandKit(id, user.id, overwrite === 'true');
+    return { message: 'Brand kit derived from your posts', data };
+  }
+
   @Patch(':id/competitors/:competitorId')
   async updateCompetitor(
     @Param('id', ParseUUIDPipe) id: string,
