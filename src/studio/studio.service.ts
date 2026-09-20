@@ -1,12 +1,15 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { randomUUID } from 'crypto';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AnalyticsService } from '../analysis/analytics.service';
+import { EmbeddingsService } from '../embeddings/embeddings.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 
@@ -19,6 +22,48 @@ import { SendMessageDto } from './dto/send-message.dto';
 
 const HISTORY_LIMIT = 24;
 const AI_TIMEOUT_MS = 180_000;
+const EXTRACT_TIMEOUT_MS = 240_000;
+const REFERENCES_BUCKET = 'references';
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+export type ReferenceKind = 'image' | 'pdf' | 'text' | 'video' | 'audio' | 'link';
+
+export interface ReferenceRow {
+  id: string;
+  project_id: string;
+  session_id: string | null;
+  kind: ReferenceKind;
+  title: string;
+  source_url: string | null;
+  storage_path: string | null;
+  mime_type: string | null;
+  size_bytes: number | null;
+  status: 'processing' | 'ready' | 'failed';
+  extracted_text: string | null;
+  summary: string | null;
+  meta: Record<string, unknown>;
+  error: string | null;
+  created_at: string;
+}
+
+/** What multer hands us for one uploaded file (typed locally: no @types/multer in the repo). */
+export interface StudioUpload {
+  originalname: string;
+  mimetype: string;
+  size: number;
+  buffer: Buffer;
+}
+
+function kindOf(mime: string, name: string): ReferenceKind | null {
+  const lower = mime.toLowerCase();
+  const ext = name.toLowerCase().split('.').pop() ?? '';
+  if (lower.startsWith('image/')) return 'image';
+  if (lower === 'application/pdf' || ext === 'pdf') return 'pdf';
+  if (lower.startsWith('video/')) return 'video';
+  if (lower.startsWith('audio/')) return 'audio';
+  if (lower.startsWith('text/') || ['txt', 'md', 'markdown', 'csv'].includes(ext)) return 'text';
+  return null;
+}
 
 export type StudioEvent =
   | { type: 'token'; text: string }
@@ -80,6 +125,7 @@ export class StudioService {
   constructor(
     private readonly supabaseService: SupabaseService,
     private readonly analyticsService: AnalyticsService,
+    private readonly embeddingsService: EmbeddingsService,
     private readonly configService: ConfigService,
   ) {
     this.aiBaseUrl = this.configService.get<string>('AI_SERVICE_URL') ?? 'http://localhost:8000';
@@ -140,6 +186,135 @@ export class StudioService {
     return { session, messages: (data ?? []) as MessageRow[] };
   }
 
+  /* ── References (uploads the user shares as examples) ───── */
+
+  async listReferences(projectId: string, sessionId: string, userId: string): Promise<ReferenceRow[]> {
+    await this.ownProject(projectId, userId);
+    const { data, error } = await this.supabaseService
+      .getClient()
+      .from('references')
+      .select('*')
+      .eq('project_id', projectId)
+      .eq('session_id', sessionId)
+      .order('created_at', { ascending: true })
+      .limit(100);
+    if (error) throw new Error(error.message);
+    return (data ?? []) as ReferenceRow[];
+  }
+
+  /**
+   * Store the file, extract what the agent can read (description, text, transcript),
+   * summarize it and embed it. Synchronous: the composer waits for "ready" before sending.
+   */
+  async uploadReference(
+    projectId: string,
+    sessionId: string,
+    userId: string,
+    file: StudioUpload,
+  ): Promise<ReferenceRow> {
+    await this.ownProject(projectId, userId);
+    await this.loadSession(projectId, sessionId);
+    const kind = kindOf(file.mimetype, file.originalname);
+    if (!kind) {
+      throw new BadRequestException('Share a photo, a PDF, a text file, or a video/audio clip.');
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      throw new BadRequestException('Files up to 25 MB — upload a shorter or more compressed clip.');
+    }
+
+    const client = this.supabaseService.getClient();
+    const safeName = file.originalname.replace(/[^\w.\-]+/g, '_').slice(0, 80);
+    const storagePath = `${projectId}/${sessionId}/${randomUUID()}-${safeName}`;
+    const { error: uploadErr } = await client.storage
+      .from(REFERENCES_BUCKET)
+      .upload(storagePath, file.buffer, { contentType: file.mimetype, upsert: false });
+    if (uploadErr) throw new Error(`Upload failed: ${uploadErr.message}`);
+    const publicUrl = client.storage.from(REFERENCES_BUCKET).getPublicUrl(storagePath).data.publicUrl;
+
+    const { data: inserted, error: insertErr } = await client
+      .from('references')
+      .insert({
+        project_id: projectId,
+        session_id: sessionId,
+        kind,
+        title: file.originalname.slice(0, 120),
+        source_url: publicUrl,
+        storage_path: storagePath,
+        mime_type: file.mimetype,
+        size_bytes: file.size,
+        status: 'processing',
+      })
+      .select('*')
+      .single();
+    if (insertErr || !inserted) throw new Error(insertErr?.message ?? 'Could not save the reference');
+    const row = inserted as ReferenceRow;
+
+    try {
+      const extracted = await this.extractReference(row, publicUrl);
+      const { data: ready } = await client
+        .from('references')
+        .update({
+          status: 'ready',
+          extracted_text: extracted.extracted_text,
+          summary: extracted.summary,
+          meta: extracted.meta ?? {},
+        })
+        .eq('id', row.id)
+        .select('*')
+        .single();
+      this.embeddingsService.embedReference(row.id).catch((err) => {
+        this.logger.warn(`Reference ${row.id} not embedded: ${(err as Error).message}`);
+      });
+      return (ready ?? { ...row, status: 'ready', ...extracted }) as ReferenceRow;
+    } catch (err) {
+      const message = (err as Error).message;
+      this.logger.warn(`Reference ${row.id} extraction failed: ${message}`);
+      const { data: failed } = await client
+        .from('references')
+        .update({ status: 'failed', error: message.slice(0, 500) })
+        .eq('id', row.id)
+        .select('*')
+        .single();
+      return (failed ?? { ...row, status: 'failed', error: message }) as ReferenceRow;
+    }
+  }
+
+  private async extractReference(
+    row: ReferenceRow,
+    url: string,
+  ): Promise<{ extracted_text: string; summary: string; meta: Record<string, unknown> }> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), EXTRACT_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${this.aiBaseUrl}/references/extract`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reference_id: row.id,
+          kind: row.kind,
+          url,
+          mime_type: row.mime_type,
+          title: row.title,
+        }),
+        signal: controller.signal,
+      });
+      const body = (await response.json().catch(() => ({}))) as {
+        detail?: string;
+        extracted_text?: string;
+        summary?: string;
+        meta?: Record<string, unknown>;
+      };
+      if (!response.ok) throw new Error(body.detail ?? `AI service returned ${response.status}`);
+      return {
+        extracted_text: body.extracted_text ?? '',
+        summary: body.summary ?? '',
+        meta: body.meta ?? {},
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /* ── One streamed turn ──────────────────────────────────── */
 
   async streamReply(
@@ -158,12 +333,26 @@ export class StudioService {
       session.content_language = dto.language;
     }
 
+    // Attachments travel with the message as reference chips
+    let attached: Array<{ type: 'reference'; id: string; title: string; kind: string }> = [];
+    if (dto.reference_ids && dto.reference_ids.length > 0) {
+      const { data: refs } = await client
+        .from('references')
+        .select('id, title, kind')
+        .eq('project_id', projectId)
+        .in('id', dto.reference_ids);
+      attached = ((refs ?? []) as Array<{ id: string; title: string; kind: string }>).map((r) => ({
+        type: 'reference',
+        ...r,
+      }));
+    }
+
     const { error: userErr } = await client
       .from('chat_messages')
-      .insert({ session_id: sessionId, role: 'user', content: dto.content });
+      .insert({ session_id: sessionId, role: 'user', content: dto.content, artifacts: attached });
     if (userErr) throw new Error(userErr.message);
 
-    const [{ data: history }, { data: brandKit }, grounding] = await Promise.all([
+    const [{ data: history }, { data: brandKit }, grounding, { data: sessionRefs }] = await Promise.all([
       client
         .from('chat_messages')
         .select('role, content, artifacts')
@@ -172,6 +361,13 @@ export class StudioService {
         .limit(HISTORY_LIMIT),
       client.from('brand_kits').select('*').eq('project_id', projectId).maybeSingle(),
       this.analyticsService.groundingFor(projectId),
+      client
+        .from('references')
+        .select('id, kind, title, summary')
+        .eq('session_id', sessionId)
+        .eq('status', 'ready')
+        .order('created_at', { ascending: true })
+        .limit(30),
     ]);
 
     // Cards are not text: tell the model what the user saw so it can refer to them
@@ -192,6 +388,7 @@ export class StudioService {
       },
       creator_memory: null,
       content_language: session.content_language,
+      references: sessionRefs ?? [],
       messages,
     };
 
@@ -407,7 +604,14 @@ export class StudioService {
 
   private messageForModel(m: Pick<MessageRow, 'role' | 'content' | 'artifacts'>): string {
     const cards = (m.artifacts ?? []) as Array<Record<string, unknown>>;
-    if (m.role !== 'assistant' || cards.length === 0) return m.content;
+    if (cards.length === 0) return m.content;
+    if (m.role === 'user') {
+      const attached = cards
+        .filter((c) => c.type === 'reference')
+        .map((c) => `${String(c.kind ?? 'file')} "${String(c.title ?? '')}" (id ${String(c.id ?? '?')})`)
+        .join('; ');
+      return attached ? `${m.content}\n[attached references: ${attached}]` : m.content;
+    }
     const summary = cards
       .map((c) =>
         c.type === 'draft'

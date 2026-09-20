@@ -176,6 +176,46 @@ export class EmbeddingsService {
     return { missing: missing.length, chunks };
   }
 
+  /** Embed a Studio reference (transcript, PDF text, image description) for retrieval. */
+  async embedReference(referenceId: string): Promise<number> {
+    const client = this.supabaseService.getClient();
+    const { data, error } = await client
+      .from('references')
+      .select('id, project_id, kind, title, extracted_text, summary')
+      .eq('id', referenceId)
+      .single();
+    if (error || !data) throw new Error(`Reference ${referenceId} not found`);
+    const ref = data as {
+      id: string;
+      project_id: string;
+      kind: string;
+      title: string;
+      extracted_text: string | null;
+      summary: string | null;
+    };
+    const text = [ref.title, ref.summary, ref.extracted_text].filter(Boolean).join('\n\n').trim();
+    if (!text) return 0;
+
+    await client.from('embeddings').delete().eq('source_type', 'reference').eq('source_id', ref.id);
+
+    const chunks = this.chunkText(text, MAX_CHUNK_CHARS).slice(0, 40);
+    const embeddings = await this.openai.embedBatch(chunks);
+    const rows = chunks.map((chunk, idx) => ({
+      project_id: ref.project_id,
+      source_type: 'reference',
+      source_id: ref.id,
+      scraped_content_id: null,
+      chunk_index: idx,
+      chunk_text: chunk,
+      token_count: Math.ceil(chunk.length / APPROX_CHARS_PER_TOKEN),
+      embedding: embeddings[idx],
+      metadata: { kind: ref.kind, title: ref.title },
+    }));
+    const { error: insertError } = await client.from('embeddings').insert(rows);
+    if (insertError) throw new Error(`Failed to insert reference embeddings: ${insertError.message}`);
+    return chunks.length;
+  }
+
   async embedBrandKit(
     projectId: string,
     brandKit: Record<string, unknown>,

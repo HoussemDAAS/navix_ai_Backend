@@ -1,4 +1,4 @@
-import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsArray, IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
 
 export class SendMessageDto {
   @IsString()
@@ -11,4 +11,10 @@ export class SendMessageDto {
   @IsString()
   @MaxLength(60)
   language?: string;
+
+  /** References (uploads) attached to this message */
+  @IsOptional()
+  @IsArray()
+  @IsUUID('all', { each: true })
+  reference_ids?: string[];
 }

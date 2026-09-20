@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -8,14 +9,19 @@ import {
   ParseUUIDPipe,
   Post,
   Res,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
-import { StudioService, type StudioEvent } from './studio.service';
+import { StudioService, type StudioEvent, type StudioUpload } from './studio.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 import { SupabaseAuthGuard } from '../auth/supabase-auth.guard';
 import { CurrentUser, AuthUser } from '../auth/current-user.decorator';
+
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 @Controller('projects/:id/studio')
 @UseGuards(SupabaseAuthGuard)
@@ -47,6 +53,31 @@ export class StudioController {
   ) {
     const data = await this.studioService.getMessages(id, sessionId, user.id);
     return { message: 'Messages retrieved', data };
+  }
+
+  @Get('sessions/:sessionId/references')
+  async listReferences(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('sessionId', ParseUUIDPipe) sessionId: string,
+    @CurrentUser() user: AuthUser,
+  ) {
+    const data = await this.studioService.listReferences(id, sessionId, user.id);
+    return { message: 'References retrieved', data };
+  }
+
+  /** Upload one example (photo, PDF, text, video/audio); answers once it is readable by the agent. */
+  @Post('sessions/:sessionId/references')
+  @HttpCode(HttpStatus.CREATED)
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
+  async uploadReference(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('sessionId', ParseUUIDPipe) sessionId: string,
+    @CurrentUser() user: AuthUser,
+    @UploadedFile() file?: StudioUpload,
+  ) {
+    if (!file) throw new BadRequestException('No file received');
+    const data = await this.studioService.uploadReference(id, sessionId, user.id, file);
+    return { message: data.status === 'ready' ? 'Reference ready' : 'Reference could not be read', data };
   }
 
   /** One assistant turn, streamed as Server-Sent Events (fetch + ReadableStream on the client). */
