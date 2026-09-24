@@ -54,6 +54,30 @@ export class CalendarController {
     };
   }
 
+  /** Approve → schedule: one draft onto the next best slot (or a given date). */
+  @Post('schedule-draft')
+  @HttpCode(HttpStatus.CREATED)
+  async scheduleDraft(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+    @Body() body: Record<string, unknown>,
+  ) {
+    const data = await this.calendarService.scheduleDraft(id, user.id, body ?? {});
+    return { message: data.already ? 'Already scheduled' : 'Draft scheduled', data };
+  }
+
+  /** Every approved, unscheduled draft gets a slot over the coming days, best days first. */
+  @Post('plan-week')
+  @HttpCode(HttpStatus.CREATED)
+  async planWeek(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+    @Body() body: Record<string, unknown>,
+  ) {
+    const data = await this.calendarService.planWeek(id, user.id, body ?? {});
+    return { message: `${data.items.length} draft(s) scheduled`, data };
+  }
+
   @Patch(':itemId')
   async update(
     @Param('id', ParseUUIDPipe) id: string,

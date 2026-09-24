@@ -93,6 +93,30 @@ const RECONCILE_INTERVAL_MS = 60_000; // sweep for stuck jobs every minute
 const RECONCILE_MIN_AGE_MS = 45_000; // only consider jobs older than this
 const START_TIMEOUT_MS = 15 * 60_000; // queued without a run id → give up
 const SNAPSHOT_SAMPLE_SIZE = 60; // most recent posts averaged into each account snapshot
+const DRAFT_MATCH_THRESHOLD = 0.45; // bigram Dice similarity between a draft and a real post
+
+function captionTokens(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/[#@][\w.]+/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 1);
+}
+
+/** Dice similarity over word bigrams — robust to emoji, hashtags and small edits. */
+function captionSimilarity(a: string, b: string): number {
+  const ta = captionTokens(a);
+  const tb = captionTokens(b);
+  if (ta.length < 3 || tb.length < 3) return 0;
+  const bigrams = (t: string[]) => new Set(t.slice(0, -1).map((w, i) => `${w} ${t[i + 1]}`));
+  const setA = bigrams(ta);
+  const setB = bigrams(tb);
+  let shared = 0;
+  for (const g of setA) if (setB.has(g)) shared++;
+  return (2 * shared) / (setA.size + setB.size);
+}
 
 // Data freshness. The sweep runs on boot and every few hours while the backend is up
 // and refreshes only what is older than its threshold — so it behaves the same on a
@@ -1054,6 +1078,119 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(
         `Freshness bookkeeping failed for ${table}=${accountId}: ${(err as Error).message}`,
       );
+    }
+
+    if (isSelf) await this.matchPublishedDrafts(job.project_id);
+  }
+
+  /**
+   * Performance loop: match the account's real posts to the drafts they came
+   * from (caption similarity) and keep each draft's numbers against the
+   * account's averages. Runs after every self scrape; never throws.
+   */
+  private async matchPublishedDrafts(projectId: string): Promise<void> {
+    const client = this.supabaseService.getClient();
+    try {
+      const { data: draftRows } = await client
+        .from('drafts')
+        .select(
+          'id, caption_text, status, created_at, published_content_id, content_directions!inner(brief_id, analysis_briefs!inner(project_id))',
+        )
+        .eq('content_directions.analysis_briefs.project_id', projectId)
+        .neq('status', 'REJECTED')
+        .not('caption_text', 'is', null)
+        .order('created_at', { ascending: false })
+        .limit(60);
+      const drafts = (draftRows ?? []) as Array<{
+        id: string;
+        caption_text: string;
+        status: string;
+        created_at: string;
+        published_content_id: string | null;
+      }>;
+      if (drafts.length === 0) return;
+
+      const { data: postRows } = await client
+        .from('scraped_content')
+        .select('id, caption, likes_count, comments_count, views_count, published_at')
+        .eq('project_id', projectId)
+        .eq('source_type', 'self')
+        .order('published_at', { ascending: false, nullsFirst: false })
+        .limit(80);
+      const posts = (postRows ?? []) as Array<{
+        id: string;
+        caption: string | null;
+        likes_count: number | null;
+        comments_count: number | null;
+        views_count: number | null;
+        published_at: string | null;
+      }>;
+      if (posts.length === 0) return;
+
+      const mean = (values: number[]) =>
+        values.length ? values.reduce((sum, v) => sum + v, 0) / values.length : 0;
+      const round = (n: number, digits = 1) => Math.round(n * 10 ** digits) / 10 ** digits;
+      const avgLikes = mean(posts.map((p) => p.likes_count ?? 0));
+      const avgComments = mean(posts.map((p) => p.comments_count ?? 0));
+      const avgViews = mean(posts.map((p) => p.views_count ?? 0).filter((v) => v > 0));
+      const avgInteractions = mean(posts.map((p) => (p.likes_count ?? 0) + (p.comments_count ?? 0)));
+      const now = new Date().toISOString();
+      let matched = 0;
+
+      for (const draft of drafts) {
+        let post = draft.published_content_id
+          ? (posts.find((p) => p.id === draft.published_content_id) ?? null)
+          : null;
+        if (!post) {
+          // Only a post published after the draft existed can be that draft
+          let best: (typeof posts)[number] | null = null;
+          let bestScore = 0;
+          for (const candidate of posts) {
+            if (!candidate.caption?.trim()) continue;
+            if (candidate.published_at && candidate.published_at < draft.created_at) continue;
+            const score = captionSimilarity(draft.caption_text, candidate.caption);
+            if (score > bestScore) {
+              bestScore = score;
+              best = candidate;
+            }
+          }
+          if (!best || bestScore < DRAFT_MATCH_THRESHOLD) continue;
+          post = best;
+        }
+
+        const likes = post.likes_count ?? 0;
+        const comments = post.comments_count ?? 0;
+        const views = post.views_count ?? 0;
+        const performance = {
+          likes,
+          comments,
+          views,
+          avg_likes: round(avgLikes),
+          avg_comments: round(avgComments),
+          avg_views: round(avgViews),
+          vs_avg_likes: avgLikes > 0 ? round(likes / avgLikes, 2) : null,
+          vs_avg_interactions: avgInteractions > 0 ? round((likes + comments) / avgInteractions, 2) : null,
+          measured_at: now,
+        };
+        await client
+          .from('drafts')
+          .update({
+            published_content_id: post.id,
+            published_at: post.published_at ?? now,
+            performance,
+            status: 'APPROVED',
+          })
+          .eq('id', draft.id);
+        await client
+          .from('calendar_items')
+          .update({ status: 'published' })
+          .eq('draft_id', draft.id)
+          .eq('status', 'planned');
+        matched++;
+      }
+      if (matched > 0) this.logger.log(`Performance loop: ${matched} draft(s) matched to real posts in project ${projectId}`);
+    } catch (err) {
+      this.logger.warn(`Performance loop failed for project ${projectId}: ${(err as Error).message}`);
     }
   }
 

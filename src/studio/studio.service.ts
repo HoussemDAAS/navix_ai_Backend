@@ -675,8 +675,25 @@ export class StudioService {
     type FeedbackJoin = { action: string; notes: string | null; drafts: { caption_text: string | null } | Array<{ caption_text: string | null }> | null };
     const decisions = ((feedback ?? []) as FeedbackJoin[]).map((f) => {
       const draft = Array.isArray(f.drafts) ? f.drafts[0] : f.drafts;
-      return { action: f.action, caption: draft?.caption_text ?? null, notes: f.notes };
+      return { action: f.action, caption: draft?.caption_text ?? null, notes: f.notes as string | null };
     });
+
+    // Results beat opinions: drafts that were actually posted carry their numbers
+    const { data: posted } = await client
+      .from('drafts')
+      .select('caption_text, performance, content_directions!inner(brief_id, analysis_briefs!inner(project_id))')
+      .eq('content_directions.analysis_briefs.project_id', projectId)
+      .not('performance', 'is', null)
+      .order('published_at', { ascending: false })
+      .limit(10);
+    for (const p of (posted ?? []) as Array<{ caption_text: string | null; performance: Record<string, unknown> | null }>) {
+      const ratio = p.performance?.vs_avg_interactions as number | null | undefined;
+      const note =
+        ratio != null
+          ? `${ratio >= 1 ? '+' : ''}${Math.round((ratio - 1) * 100)}% interactions vs the account's average`
+          : `${String(p.performance?.likes ?? 0)} likes`;
+      decisions.push({ action: 'published', caption: p.caption_text, notes: note });
+    }
     if (transcript.length === 0 && decisions.length === 0) return;
 
     const label = `session of ${new Date().toISOString().slice(0, 10)}`;
