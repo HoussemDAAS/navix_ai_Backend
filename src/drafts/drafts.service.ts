@@ -160,7 +160,7 @@ export class DraftsService {
     const { data, error } = await client
       .from('drafts')
       .select(
-        '*, content_directions!inner(brief_id, analysis_briefs!inner(project_id))',
+        '*, content_directions!inner(id, title_pillar, angle, format, brief_id, analysis_briefs!inner(project_id))',
       )
       .eq('content_directions.analysis_briefs.project_id', projectId)
       .order('created_at', { ascending: false });
@@ -174,7 +174,19 @@ export class DraftsService {
 
     return (data ?? []).map((row) => {
       const r = row as Record<string, unknown>;
-      // Strip nested join data before returning
+      // Keep the direction's identity for the Library; drop the ownership join
+      const joined = r.content_directions as
+        | { id: string; title_pillar: string; angle: string | null; format: string | null }
+        | null
+        | undefined;
+      if (joined) {
+        r.direction = {
+          id: joined.id,
+          title_pillar: joined.title_pillar,
+          angle: joined.angle,
+          format: joined.format,
+        };
+      }
       delete r.content_directions;
       return r as unknown as DraftRow;
     });
