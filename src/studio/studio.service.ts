@@ -76,11 +76,21 @@ function kindOf(mime: string, name: string): ReferenceKind | null {
   return null;
 }
 
+/** A decision the assistant asks for as a small form instead of prose. */
+export interface StudioQuestion {
+  question: string;
+  kind: 'single' | 'multi' | 'text';
+  options: Array<{ label: string; hint?: string }>;
+  allow_other: boolean;
+}
+
 export type StudioEvent =
   | { type: 'token'; text: string }
   | { type: 'tool'; name: string; query?: string; hits?: number }
   | { type: 'ideas'; ideas: StudioIdea[] }
   | { type: 'draft'; draft: StudioDraft }
+  | { type: 'question'; question: StudioQuestion }
+  | { type: 'suggestions'; suggestions: string[] }
   | { type: 'saved'; message_id: string }
   | { type: 'done' }
   | { type: 'error'; message: string };
@@ -526,6 +536,16 @@ export class StudioService {
         emit({ type: 'draft', draft: saved });
         return;
       }
+      if (event.type === 'question') {
+        artifacts.push({ type: 'question', ...event.question });
+        emit(event);
+        return;
+      }
+      if (event.type === 'suggestions') {
+        artifacts.push({ type: 'suggestions', suggestions: event.suggestions });
+        emit(event);
+        return;
+      }
       if (event.type === 'error') {
         emit(event);
         return;
@@ -910,13 +930,16 @@ export class StudioService {
       return attached ? `${m.content}\n[attached references: ${attached}]` : m.content;
     }
     const summary = cards
+      .filter((c) => c.type !== 'suggestions')
       .map((c) =>
         c.type === 'draft'
           ? `draft ${String(c.id ?? '?')} v${String(c.version ?? 1)} "${String(c.idea_title ?? '')}" (${String(c.format ?? '')})`
-          : `idea ${String(c.id ?? '?')} "${String(c.title_pillar ?? '')}"`,
+          : c.type === 'question'
+            ? `question asked: "${String(c.question ?? '')}"`
+            : `idea ${String(c.id ?? '?')} "${String(c.title_pillar ?? '')}"`,
       )
       .join('; ');
-    return `${m.content}\n[cards shown: ${summary}]`;
+    return summary ? `${m.content}\n[cards shown: ${summary}]` : m.content;
   }
 
   private buildOpener(project: Record<string, unknown>, model: Record<string, unknown> | null): string {
