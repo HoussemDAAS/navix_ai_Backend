@@ -6,6 +6,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { AnalysisService } from './analysis.service';
@@ -29,6 +30,21 @@ export class AnalysisController {
   ) {
     const data = await this.analyticsService.getFieldAnalytics(id, user.id);
     return { message: 'Field analytics computed', data };
+  }
+
+  /** The Home digest: what moved this week, best posts, the pipeline and one grounded idea. */
+  @Get('digest')
+  async getWeeklyDigest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+    @Query('refresh') refresh?: string,
+  ) {
+    const data = await this.analyticsService.getWeeklyDigest(
+      id,
+      user.id,
+      refresh === 'true' || refresh === '1',
+    );
+    return { message: 'Weekly digest computed', data };
   }
 
   @Post('run')

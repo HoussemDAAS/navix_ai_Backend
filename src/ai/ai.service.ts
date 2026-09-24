@@ -139,13 +139,30 @@ export interface BrandKitDeriveResponse {
   confidence?: number | null;
 }
 
+export interface WeeklyDigestInput {
+  project_id: string;
+  persona: string | null;
+  account_model: Record<string, unknown> | null;
+  creator_memory: string | null;
+  brand_kit: Record<string, unknown> | null;
+  project: { name: string | null; niche: string | null; handle: string | null; language: string | null };
+  /** The computed digest facts: account deltas, own best post, field breakout, pipeline */
+  facts: Record<string, unknown>;
+}
+
+export interface WeeklyDigestResponse {
+  headline?: string | null;
+  idea?: { title: string; why: string; format?: string | null; studio_prompt: string } | null;
+}
+
 type AiRequestBody =
   | MarketAnalysisInput
   | DirectionGenerationInput
   | DraftGenerationInput
   | BrandMemoryInput
   | BrandKitDeriveInput
-  | CreatorMemoryUpdateInput;
+  | CreatorMemoryUpdateInput
+  | WeeklyDigestInput;
 
 @Injectable()
 export class AiService {
@@ -200,6 +217,11 @@ export class AiService {
   async updateCreatorMemory(data: CreatorMemoryUpdateInput): Promise<CreatorMemoryUpdateResponse> {
     const result = await this.callEndpoint('/agents/creator-memory', data);
     return result as unknown as CreatorMemoryUpdateResponse;
+  }
+
+  async weeklyDigest(data: WeeklyDigestInput): Promise<WeeklyDigestResponse> {
+    const result = await this.callEndpoint('/agents/weekly-digest', data);
+    return result as unknown as WeeklyDigestResponse;
   }
 
   private async callEndpoint(
