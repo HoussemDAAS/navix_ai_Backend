@@ -8,9 +8,16 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { SupabaseService } from '../supabase/supabase.service';
-import { AnalyticsService } from '../analysis/analytics.service';
+import {
+  AnalyticsService,
+  MEMORY_KINDS,
+  normalizeCreatorMemory,
+  type CreatorMemory,
+  type CreatorMemoryItem,
+} from '../analysis/analytics.service';
 import { EmbeddingsService } from '../embeddings/embeddings.service';
 import { ScraperService, type ScrapedPost } from '../scraper/scraper.service';
+import { AiService } from '../ai/ai.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 
@@ -26,6 +33,9 @@ const AI_TIMEOUT_MS = 180_000;
 const EXTRACT_TIMEOUT_MS = 240_000;
 const REFERENCES_BUCKET = 'references';
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+/** New messages in a session before a learning pass runs on it (two exchanges) */
+const MEMORY_LEARN_EVERY = 4;
+const MEMORY_MAX_ITEMS = 40;
 
 export type ReferenceKind = 'image' | 'pdf' | 'text' | 'video' | 'audio' | 'link';
 
@@ -128,6 +138,7 @@ export class StudioService {
     private readonly analyticsService: AnalyticsService,
     private readonly embeddingsService: EmbeddingsService,
     private readonly scraperService: ScraperService,
+    private readonly aiService: AiService,
     private readonly configService: ConfigService,
   ) {
     this.aiBaseUrl = this.configService.get<string>('AI_SERVICE_URL') ?? 'http://localhost:8000';
@@ -488,7 +499,7 @@ export class StudioService {
         handle: project.instagram_handle ?? project.tiktok_handle ?? null,
         location: project.location,
       },
-      creator_memory: null,
+      creator_memory: grounding.creator_memory,
       content_language: session.content_language,
       references: sessionRefs ?? [],
       messages,
@@ -534,6 +545,173 @@ export class StudioService {
 
     emit({ type: 'saved', message_id: (assistant as { id: string } | null)?.id ?? '' });
     emit({ type: 'done' });
+
+    // Every couple of exchanges the session teaches the creator memory — off the request path
+    void this.maybeLearn(projectId, sessionId);
+  }
+
+  /* ── Creator memory ─────────────────────────────────────── */
+
+  async getMemory(projectId: string, userId: string): Promise<CreatorMemory & { updated_at: string | null }> {
+    await this.ownProject(projectId, userId);
+    const { data } = await this.supabaseService
+      .getClient()
+      .from('projects')
+      .select('creator_memory, creator_memory_updated_at')
+      .eq('id', projectId)
+      .maybeSingle();
+    const row = (data ?? null) as { creator_memory: unknown; creator_memory_updated_at: string | null } | null;
+    return { ...normalizeCreatorMemory(row?.creator_memory), updated_at: row?.creator_memory_updated_at ?? null };
+  }
+
+  /** The user edits what Navix knows: rewrite the summary, remove or add items. */
+  async updateMemory(
+    projectId: string,
+    userId: string,
+    body: { summary?: unknown; learned?: unknown },
+  ): Promise<CreatorMemory & { updated_at: string | null }> {
+    await this.ownProject(projectId, userId);
+    const current = await this.getMemory(projectId, userId);
+    const now = new Date().toISOString();
+
+    const summary =
+      typeof body.summary === 'string' ? body.summary.trim().slice(0, 600) : current.summary;
+    let learned = current.learned;
+    if (Array.isArray(body.learned)) {
+      learned = body.learned
+        .filter((i): i is Record<string, unknown> => !!i && typeof i === 'object')
+        .map((i) => ({
+          id: typeof i.id === 'string' && i.id ? i.id : randomUUID(),
+          text: String(i.text ?? '').trim().slice(0, 160),
+          kind: (MEMORY_KINDS as readonly string[]).includes(String(i.kind)) ? String(i.kind) : 'preference',
+          source: String(i.source ?? 'you').trim().slice(0, 80) || 'you',
+          learned_at: typeof i.learned_at === 'string' && i.learned_at ? i.learned_at : now,
+        }))
+        .filter((i) => i.text.length > 0)
+        .slice(0, MEMORY_MAX_ITEMS);
+    }
+
+    const memory: CreatorMemory = { summary, learned };
+    const { error } = await this.supabaseService
+      .getClient()
+      .from('projects')
+      .update({ creator_memory: memory, creator_memory_updated_at: now })
+      .eq('id', projectId);
+    if (error) throw new Error(error.message);
+    return { ...memory, updated_at: now };
+  }
+
+  /** On demand: learn from the two most recent sessions, regardless of how much is new. */
+  async refreshMemory(projectId: string, userId: string): Promise<CreatorMemory & { updated_at: string | null }> {
+    await this.ownProject(projectId, userId);
+    const { data } = await this.supabaseService
+      .getClient()
+      .from('chat_sessions')
+      .select('id')
+      .eq('project_id', projectId)
+      .order('last_message_at', { ascending: false })
+      .limit(2);
+    const ids = ((data ?? []) as Array<{ id: string }>).map((s) => s.id);
+    if (ids.length > 0) await this.learnFromSessions(projectId, ids);
+    return this.getMemory(projectId, userId);
+  }
+
+  private async maybeLearn(projectId: string, sessionId: string): Promise<void> {
+    try {
+      const client = this.supabaseService.getClient();
+      const { data: session } = await client
+        .from('chat_sessions')
+        .select('memory_synced_at, created_at')
+        .eq('id', sessionId)
+        .maybeSingle();
+      const row = (session ?? null) as { memory_synced_at: string | null; created_at: string } | null;
+      if (!row) return;
+      const since = row.memory_synced_at ?? row.created_at;
+      const { count } = await client
+        .from('chat_messages')
+        .select('id', { count: 'exact', head: true })
+        .eq('session_id', sessionId)
+        .gt('created_at', since);
+      if ((count ?? 0) < MEMORY_LEARN_EVERY) return;
+      await this.learnFromSessions(projectId, [sessionId]);
+    } catch (err) {
+      this.logger.warn(`Creator memory pass skipped for session ${sessionId}: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * One learning pass: the sessions' conversation plus the approve/reject decisions
+   * on their drafts go to the AI service, which returns the whole updated memory.
+   * Item ids survive so the user's deletions keep working.
+   */
+  private async learnFromSessions(projectId: string, sessionIds: string[]): Promise<void> {
+    const client = this.supabaseService.getClient();
+    const [{ data: project }, { data: brandKit }, { data: history }, { data: feedback }] = await Promise.all([
+      client.from('projects').select('user_id, persona, creator_memory').eq('id', projectId).maybeSingle(),
+      client.from('brand_kits').select('*').eq('project_id', projectId).maybeSingle(),
+      client
+        .from('chat_messages')
+        .select('role, content, artifacts, created_at')
+        .in('session_id', sessionIds)
+        .order('created_at', { ascending: true })
+        .limit(60),
+      client
+        .from('feedback')
+        .select('action, notes, created_at, drafts!inner(caption_text, session_id)')
+        .in('drafts.session_id', sessionIds)
+        .order('created_at', { ascending: true })
+        .limit(30),
+    ]);
+    const row = (project ?? null) as { user_id: string; persona: string | null; creator_memory: unknown } | null;
+    if (!row) return;
+    const { data: profile } = await client.from('profiles').select('persona').eq('id', row.user_id).maybeSingle();
+    const persona = ((profile ?? null) as { persona: string | null } | null)?.persona ?? row.persona ?? null;
+    const current = normalizeCreatorMemory(row.creator_memory);
+
+    const transcript = ((history ?? []) as Array<Pick<MessageRow, 'role' | 'content' | 'artifacts'>>).map((m) => ({
+      role: m.role,
+      content: this.messageForModel(m),
+    }));
+    type FeedbackJoin = { action: string; notes: string | null; drafts: { caption_text: string | null } | Array<{ caption_text: string | null }> | null };
+    const decisions = ((feedback ?? []) as FeedbackJoin[]).map((f) => {
+      const draft = Array.isArray(f.drafts) ? f.drafts[0] : f.drafts;
+      return { action: f.action, caption: draft?.caption_text ?? null, notes: f.notes };
+    });
+    if (transcript.length === 0 && decisions.length === 0) return;
+
+    const label = `session of ${new Date().toISOString().slice(0, 10)}`;
+    const result = await this.aiService.updateCreatorMemory({
+      project_id: projectId,
+      persona,
+      brand_kit: (brandKit as Record<string, unknown> | null) ?? null,
+      current_memory: { summary: current.summary, learned: current.learned },
+      transcript,
+      feedback: decisions,
+      session_label: label,
+    });
+
+    const now = new Date().toISOString();
+    const byText = new Map(current.learned.map((i) => [i.text.toLowerCase(), i]));
+    const learned: CreatorMemoryItem[] = (result.memory?.learned ?? [])
+      .map((i) => {
+        const kept = byText.get(String(i.text).toLowerCase());
+        return {
+          id: kept?.id ?? randomUUID(),
+          text: String(i.text).slice(0, 160),
+          kind: (MEMORY_KINDS as readonly string[]).includes(String(i.kind)) ? String(i.kind) : 'preference',
+          source: String(i.source ?? label).slice(0, 80),
+          learned_at: kept?.learned_at ?? now,
+        };
+      })
+      .slice(0, MEMORY_MAX_ITEMS);
+    const memory: CreatorMemory = { summary: String(result.memory?.summary ?? current.summary).slice(0, 600), learned };
+
+    await client
+      .from('projects')
+      .update({ creator_memory: memory, creator_memory_updated_at: now })
+      .eq('id', projectId);
+    await client.from('chat_sessions').update({ memory_synced_at: now }).in('id', sessionIds);
+    this.logger.log(`Creator memory updated for project ${projectId}: ${learned.length} items`);
   }
 
   /* ── Persistence of cards ───────────────────────────────── */

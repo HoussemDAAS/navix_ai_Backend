@@ -7,6 +7,36 @@ export interface AgentGrounding {
   persona?: string | null;
   /** Field analytics computed from scraped posts (self vs field) */
   account_model?: Record<string, unknown> | null;
+  /** What Navix has learned about this creator across sessions, already formatted */
+  creator_memory?: string | null;
+}
+
+export interface CreatorMemoryItemPayload {
+  id?: string;
+  text: string;
+  kind: string;
+  source: string;
+  learned_at?: string | null;
+}
+
+export interface CreatorMemoryPayload {
+  summary: string;
+  learned: CreatorMemoryItemPayload[];
+}
+
+export interface CreatorMemoryUpdateInput {
+  project_id: string;
+  persona: string | null;
+  brand_kit: Record<string, unknown> | null;
+  current_memory: CreatorMemoryPayload;
+  transcript: Array<{ role: string; content: string }>;
+  feedback: Array<{ action: string; caption?: string | null; notes?: string | null; idea_title?: string | null }>;
+  session_label: string;
+}
+
+export interface CreatorMemoryUpdateResponse {
+  memory: CreatorMemoryPayload;
+  changed: boolean;
 }
 
 export interface MarketAnalysisInput extends AgentGrounding {
@@ -114,7 +144,8 @@ type AiRequestBody =
   | DirectionGenerationInput
   | DraftGenerationInput
   | BrandMemoryInput
-  | BrandKitDeriveInput;
+  | BrandKitDeriveInput
+  | CreatorMemoryUpdateInput;
 
 @Injectable()
 export class AiService {
@@ -163,6 +194,12 @@ export class AiService {
   async deriveBrandKit(data: BrandKitDeriveInput): Promise<BrandKitDeriveResponse> {
     const result = await this.callEndpoint('/agents/brand-kit-derive', data);
     return result as unknown as BrandKitDeriveResponse;
+  }
+
+  /** Fold a session's conversation and draft decisions into the creator memory. */
+  async updateCreatorMemory(data: CreatorMemoryUpdateInput): Promise<CreatorMemoryUpdateResponse> {
+    const result = await this.callEndpoint('/agents/creator-memory', data);
+    return result as unknown as CreatorMemoryUpdateResponse;
   }
 
   private async callEndpoint(

@@ -7,6 +7,7 @@ import {
   HttpStatus,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Res,
   UploadedFile,
@@ -33,6 +34,31 @@ export class StudioController {
   async listSessions(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthUser) {
     const data = await this.studioService.listSessions(id, user.id);
     return { message: 'Sessions retrieved', data };
+  }
+
+  /** What Navix has learned about this creator across sessions. */
+  @Get('memory')
+  async getMemory(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthUser) {
+    const data = await this.studioService.getMemory(id, user.id);
+    return { message: 'Memory retrieved', data };
+  }
+
+  /** The user edits the memory: summary and/or the full list of items. */
+  @Patch('memory')
+  async updateMemory(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+    @Body() body: Record<string, unknown>,
+  ) {
+    const data = await this.studioService.updateMemory(id, user.id, body ?? {});
+    return { message: 'Memory updated', data };
+  }
+
+  /** Learn from the most recent sessions now. */
+  @Post('memory/refresh')
+  async refreshMemory(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthUser) {
+    const data = await this.studioService.refreshMemory(id, user.id);
+    return { message: 'Memory refreshed', data };
   }
 
   @Post('sessions')

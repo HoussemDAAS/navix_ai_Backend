@@ -95,6 +95,64 @@ export interface FieldAnalytics {
 
 export const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
+/* ── Creator memory (projects.creator_memory) ─────────────── */
+
+export interface CreatorMemoryItem {
+  id: string;
+  text: string;
+  kind: string;
+  source: string;
+  learned_at: string;
+}
+
+export interface CreatorMemory {
+  summary: string;
+  learned: CreatorMemoryItem[];
+}
+
+export const MEMORY_KINDS = ['preference', 'avoid', 'topic', 'format', 'voice', 'audience', 'goal'] as const;
+
+const MEMORY_KIND_LABEL: Record<string, string> = {
+  preference: 'Prefers',
+  avoid: 'Avoid',
+  topic: 'Recurring topics',
+  format: 'Formats they choose',
+  voice: 'Voice',
+  audience: 'Audience',
+  goal: 'Goals',
+};
+
+/** Tolerant read of the jsonb column: never trust its shape blindly. */
+export function normalizeCreatorMemory(raw: unknown): CreatorMemory {
+  const obj = (raw && typeof raw === 'object' ? raw : {}) as { summary?: unknown; learned?: unknown };
+  const learned = Array.isArray(obj.learned)
+    ? obj.learned
+        .filter((i): i is Record<string, unknown> => !!i && typeof i === 'object')
+        .map((i) => ({
+          id: String(i.id ?? ''),
+          text: String(i.text ?? '').trim(),
+          kind: String(i.kind ?? 'preference'),
+          source: String(i.source ?? ''),
+          learned_at: String(i.learned_at ?? ''),
+        }))
+        .filter((i) => i.text.length > 0)
+    : [];
+  return { summary: typeof obj.summary === 'string' ? obj.summary : '', learned };
+}
+
+/** Render the memory for a prompt: the summary, then one line per kind. */
+export function formatCreatorMemory(raw: unknown): string | null {
+  const memory = normalizeCreatorMemory(raw);
+  if (!memory.summary && memory.learned.length === 0) return null;
+  const lines: string[] = [];
+  if (memory.summary) lines.push(`Summary: ${memory.summary}`);
+  for (const kind of MEMORY_KINDS) {
+    const items = memory.learned.filter((i) => i.kind === kind).map((i) => i.text);
+    if (items.length > 0) lines.push(`${MEMORY_KIND_LABEL[kind]}: ${items.join('; ')}`);
+  }
+  return lines.join('\n');
+}
+
 function round(n: number, digits = 1): number {
   const f = 10 ** digits;
   return Math.round(n * f) / f;
@@ -186,16 +244,21 @@ export class AnalyticsService {
   async groundingFor(projectId: string): Promise<{
     persona: string | null;
     account_model: Record<string, unknown> | null;
+    creator_memory: string | null;
   }> {
     const client = this.supabaseService.getClient();
     try {
       const { data: project } = await client
         .from('projects')
-        .select('user_id, persona')
+        .select('user_id, persona, creator_memory')
         .eq('id', projectId)
         .maybeSingle();
-      const row = (project ?? null) as { user_id: string; persona: string | null } | null;
-      if (!row) return { persona: null, account_model: null };
+      const row = (project ?? null) as {
+        user_id: string;
+        persona: string | null;
+        creator_memory: unknown;
+      } | null;
+      if (!row) return { persona: null, account_model: null, creator_memory: null };
 
       const { data: profile } = await client
         .from('profiles')
@@ -206,9 +269,13 @@ export class AnalyticsService {
         ((profile ?? null) as { persona: string | null } | null)?.persona ?? row.persona ?? null;
 
       const model = await this.getFieldAnalytics(projectId, row.user_id).catch(() => null);
-      return { persona, account_model: model as unknown as Record<string, unknown> | null };
+      return {
+        persona,
+        account_model: model as unknown as Record<string, unknown> | null,
+        creator_memory: formatCreatorMemory(row.creator_memory),
+      };
     } catch {
-      return { persona: null, account_model: null };
+      return { persona: null, account_model: null, creator_memory: null };
     }
   }
 

@@ -4,9 +4,10 @@ import { StudioService } from './studio.service';
 import { AnalysisModule } from '../analysis/analysis.module';
 import { EmbeddingsModule } from '../embeddings/embeddings.module';
 import { ScraperModule } from '../scraper/scraper.module';
+import { AiModule } from '../ai/ai.module';
 
 @Module({
-  imports: [AnalysisModule, EmbeddingsModule, ScraperModule],
+  imports: [AnalysisModule, EmbeddingsModule, ScraperModule, AiModule],
   controllers: [StudioController],
   providers: [StudioService],
   exports: [StudioService],
