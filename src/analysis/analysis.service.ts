@@ -18,6 +18,22 @@ interface BriefPayload {
   key_takeaways: string[];
 }
 
+/** How current the latest brief is against the competitor posts collected since it was written */
+export interface BriefFreshness {
+  generated_at: string | null;
+  new_posts_since: number;
+  age_days: number;
+  stale: boolean;
+}
+
+const DAY_MS = 24 * 3600 * 1000;
+/** Shown as "worth updating" past either threshold */
+const STALE_MIN_NEW_POSTS = 5;
+const STALE_MAX_AGE_DAYS = 14;
+/** The refresh sweep re-runs the analysis on its own past both thresholds */
+const AUTO_REFRESH_MIN_NEW_POSTS = 10;
+const AUTO_REFRESH_MIN_AGE_DAYS = 7;
+
 @Injectable()
 export class AnalysisService {
   private readonly logger = new Logger(AnalysisService.name);
@@ -138,7 +154,71 @@ export class AnalysisService {
       throw new Error(`Failed to fetch analysis: ${error.message}`);
     }
     if (!data) return null;
-    return this.completeBrief(projectId, data as Record<string, unknown>);
+    const brief = await this.completeBrief(projectId, data as Record<string, unknown>);
+    const freshness = await this.briefFreshness(
+      projectId,
+      (data as { generated_at?: string | null }).generated_at ?? null,
+    );
+    return { ...brief, freshness };
+  }
+
+  async briefFreshness(projectId: string, generatedAt: string | null): Promise<BriefFreshness> {
+    const client = this.supabaseService.getClient();
+    const { count } = await client
+      .from('scraped_content')
+      .select('id', { count: 'exact', head: true })
+      .eq('project_id', projectId)
+      .eq('source_type', 'competitor')
+      .gt('scraped_at', generatedAt ?? '1970-01-01T00:00:00Z');
+    const newPosts = count ?? 0;
+    const ageDays = generatedAt
+      ? Math.floor((Date.now() - new Date(generatedAt).getTime()) / DAY_MS)
+      : 0;
+    return {
+      generated_at: generatedAt,
+      new_posts_since: newPosts,
+      age_days: ageDays,
+      stale: newPosts >= STALE_MIN_NEW_POSTS || ageDays >= STALE_MAX_AGE_DAYS,
+    };
+  }
+
+  /**
+   * Re-run the market analysis without anyone asking when enough new competitor
+   * content arrived since the last brief and that brief is at least a week old.
+   * Called by the data refresh sweep; never throws. A project that was never
+   * analyzed is left alone: the first run stays the user's decision.
+   */
+  async refreshIfStale(projectId: string, userId: string): Promise<boolean> {
+    try {
+      const client = this.supabaseService.getClient();
+      const { data } = await client
+        .from('analysis_briefs')
+        .select('generated_at')
+        .eq('project_id', projectId)
+        .order('generated_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const generatedAt =
+        ((data ?? null) as { generated_at: string | null } | null)?.generated_at ?? null;
+      if (!generatedAt) return false;
+      const freshness = await this.briefFreshness(projectId, generatedAt);
+      if (
+        freshness.new_posts_since < AUTO_REFRESH_MIN_NEW_POSTS ||
+        freshness.age_days < AUTO_REFRESH_MIN_AGE_DAYS
+      ) {
+        return false;
+      }
+      const latest = await this.jobsService.getLatestJob(projectId, 'market_analysis');
+      if (latest && (latest.status === 'pending' || latest.status === 'active')) return false;
+      await this.runAnalysis(projectId, userId);
+      this.logger.log(
+        `Auto-refreshed market analysis for ${projectId}: ${freshness.new_posts_since} new posts, brief ${freshness.age_days} d old`,
+      );
+      return true;
+    } catch (err) {
+      this.logger.warn(`Auto analysis refresh skipped for ${projectId}: ${(err as Error).message}`);
+      return false;
+    }
   }
 
   /**

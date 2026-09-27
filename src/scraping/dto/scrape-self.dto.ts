@@ -8,12 +8,8 @@ import {
   ArrayMaxSize,
 } from 'class-validator';
 
-export const SUPPORTED_PLATFORMS = [
-  'instagram',
-  'tiktok',
-  'youtube',
-  'facebook',
-] as const;
+/** The platforms Navix scrapes. Adding one means an Apify actor, an input builder and a normalizer. */
+export const SUPPORTED_PLATFORMS = ['instagram', 'tiktok'] as const;
 export type ScrapePlatform = (typeof SUPPORTED_PLATFORMS)[number];
 
 export class ScrapeHandlesDto {
@@ -24,20 +20,12 @@ export class ScrapeHandlesDto {
   @IsOptional()
   @IsString()
   tiktok?: string;
-
-  @IsOptional()
-  @IsString()
-  youtube?: string;
-
-  @IsOptional()
-  @IsString()
-  facebook?: string;
 }
 
 export class ScrapeSelfDto {
   @IsArray()
   @ArrayMinSize(1)
-  @ArrayMaxSize(4)
+  @ArrayMaxSize(2)
   @IsIn(SUPPORTED_PLATFORMS, { each: true })
   platforms: ScrapePlatform[];
 

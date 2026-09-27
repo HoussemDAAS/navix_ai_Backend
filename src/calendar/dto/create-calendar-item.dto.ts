@@ -8,12 +8,7 @@ import {
   MaxLength,
 } from 'class-validator';
 
-export type CalendarPlatform =
-  | 'instagram'
-  | 'tiktok'
-  | 'youtube'
-  | 'facebook'
-  | 'linkedin';
+export type CalendarPlatform = 'instagram' | 'tiktok';
 
 export class CreateCalendarItemDto {
   @IsUUID()
@@ -29,7 +24,7 @@ export class CreateCalendarItemDto {
   scheduledAt!: string;
 
   @IsString()
-  @IsIn(['instagram', 'tiktok', 'youtube', 'facebook', 'linkedin'])
+  @IsIn(['instagram', 'tiktok'])
   platform!: CalendarPlatform;
 
   @IsString()

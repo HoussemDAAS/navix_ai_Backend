@@ -38,14 +38,6 @@ export class UpdateProfileDto {
   @IsString()
   tiktok_handle?: string;
 
-  @IsOptional()
-  @IsString()
-  youtube_handle?: string;
-
-  @IsOptional()
-  @IsString()
-  facebook_handle?: string;
-
   /** Full profile links pasted during onboarding; parsed server-side into handles */
   @IsOptional()
   @IsArray()

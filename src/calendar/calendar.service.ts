@@ -37,7 +37,7 @@ interface Slot {
 
 const PLAN_HORIZON_DAYS = 14;
 const DEFAULT_HOUR_UTC = 18;
-const PLATFORMS: CalendarPlatform[] = ['instagram', 'tiktok', 'youtube', 'facebook', 'linkedin'];
+const PLATFORMS: CalendarPlatform[] = ['instagram', 'tiktok'];
 
 @Injectable()
 export class CalendarService {

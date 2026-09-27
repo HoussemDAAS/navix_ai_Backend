@@ -39,14 +39,6 @@ export class DiscoverCompetitorsDto {
 
   @IsString()
   @IsOptional()
-  youtube_handle?: string;
-
-  @IsString()
-  @IsOptional()
-  facebook_handle?: string;
-
-  @IsString()
-  @IsOptional()
   @MaxLength(1000)
   niche_description?: string;
 

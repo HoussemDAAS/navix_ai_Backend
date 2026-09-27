@@ -10,6 +10,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ApifyService, APIFY_ACTORS } from './apify.service';
+import { AnalysisService } from '../analysis/analysis.service';
 import { EmbeddingsService } from '../embeddings/embeddings.service';
 import { AvatarStorageService } from '../scraper/avatar-storage.service';
 import { ScraperService } from '../scraper/scraper.service';
@@ -53,7 +54,6 @@ interface ProjectRow {
   user_id: string;
   instagram_handle: string | null;
   tiktok_handle: string | null;
-  youtube_handle: string | null;
   name: string | null;
 }
 
@@ -65,8 +65,6 @@ interface ProfileMinimal {
   country: string | null;
   instagram_handle: string | null;
   tiktok_handle: string | null;
-  youtube_handle: string | null;
-  facebook_handle?: string | null;
   persona?: string | null;
   niche_description?: string | null;
   keywords?: string[] | null;
@@ -133,6 +131,9 @@ const SELF_STALE_AFTER_MS = envHours('SELF_REFRESH_HOURS', 24);
 const COMPETITOR_STALE_AFTER_MS = envHours('COMPETITOR_REFRESH_HOURS', 72);
 const MANUAL_REFRESH_COOLDOWN_MS = envHours('MANUAL_REFRESH_COOLDOWN_HOURS', 6);
 const REFRESH_SWEEP_MAX_ACCOUNTS = 12; // per sweep, per kind — protects the Apify quota
+// Instagram signs its CDN thumbnail links; copy recent ones to storage before they expire
+const THUMBNAIL_BACKFILL_MAX_AGE_DAYS = 14;
+const THUMBNAIL_BACKFILL_BATCH = 80;
 
 @Injectable()
 export class ScrapingService implements OnModuleInit, OnModuleDestroy {
@@ -152,6 +153,7 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
     private readonly embeddingsService: EmbeddingsService,
     private readonly avatarStorage: AvatarStorageService,
     private readonly scraperService: ScraperService,
+    private readonly analysisService: AnalysisService,
   ) {
     this.webhookUrl = this.configService.get<string>(
       'APIFY_SCRAPE_WEBHOOK_URL',
@@ -399,6 +401,24 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Persisted ${saved}/${rows.length} post thumbnails to storage`);
   }
 
+  /** Recent posts whose thumbnail still points at an expiring CDN link: copy them to storage. */
+  private async backfillThumbnails(projectId: string): Promise<void> {
+    const client = this.supabaseService.getClient();
+    const since = new Date(Date.now() - THUMBNAIL_BACKFILL_MAX_AGE_DAYS * 24 * 3600_000).toISOString();
+    const { data } = await client
+      .from('scraped_content')
+      .select('id, thumbnail_url')
+      .eq('project_id', projectId)
+      .not('thumbnail_url', 'is', null)
+      .gte('scraped_at', since)
+      .order('scraped_at', { ascending: false })
+      .limit(THUMBNAIL_BACKFILL_BATCH);
+    const pending = ((data ?? []) as Array<{ id: string; thumbnail_url: string }>).filter(
+      (r) => !this.avatarStorage.isStorageUrl(r.thumbnail_url),
+    );
+    if (pending.length > 0) await this.persistThumbnails(pending.map((r) => r.id));
+  }
+
   /**
    * Called from webhooks.controller when Apify webhook fires.
    * Also used by the polling fallback.
@@ -530,8 +550,6 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
     const handles: Record<ScrapePlatform, string | undefined> = {
       instagram: profile.instagram_handle ?? undefined,
       tiktok: profile.tiktok_handle ?? undefined,
-      youtube: profile.youtube_handle ?? undefined,
-      facebook: profile.facebook_handle ?? undefined,
     };
 
     for (const p of SUPPORTED_PLATFORMS) {
@@ -734,8 +752,6 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
         persona: profile.persona ?? null,
         instagram_handle: profile.instagram_handle ?? null,
         tiktok_handle: profile.tiktok_handle ?? null,
-        youtube_handle: profile.youtube_handle ?? null,
-        facebook_handle: profile.facebook_handle ?? null,
         niche_description: profile.niche_description ?? null,
         keywords: profile.keywords ?? [],
         seed_accounts: profile.seed_accounts ?? [],
@@ -813,14 +829,22 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
         if (outcome.started) competitorsStarted++;
       }
 
-      // RAG must see the whole corpus, including posts scraped before embeddings existed
-      const { data: allProjects } = await client.from('projects').select('id').limit(50);
-      for (const p of (allProjects ?? []) as Array<{ id: string }>) {
+      // Housekeeping per project: RAG must see the whole corpus (including posts scraped
+      // before embeddings existed), recent CDN thumbnails are copied to storage before
+      // they expire, and a brief left behind by fresh competitor content is re-run.
+      const { data: allProjects } = await client.from('projects').select('id, user_id').limit(50);
+      for (const p of (allProjects ?? []) as Array<{ id: string; user_id: string }>) {
         await this.embeddingsService.backfillProject(p.id).catch((err) => {
           this.logger.warn(
             `Embedding backfill failed for project ${p.id}: ${(err as Error).message}`,
           );
         });
+        await this.backfillThumbnails(p.id).catch((err) => {
+          this.logger.warn(
+            `Thumbnail backfill failed for project ${p.id}: ${(err as Error).message}`,
+          );
+        });
+        await this.analysisService.refreshIfStale(p.id, p.user_id);
       }
 
       this.logger.log(
@@ -1244,7 +1268,7 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
     const { data, error } = await client
       .from('projects')
       .select(
-        'id, user_id, instagram_handle, tiktok_handle, youtube_handle, name',
+        'id, user_id, instagram_handle, tiktok_handle, name',
       )
       .eq('id', projectId)
       .single();

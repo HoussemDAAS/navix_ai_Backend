@@ -252,14 +252,12 @@ export class ProjectsService {
         location: dto.location ?? null,
         persona,
         is_primary: existing === 0,
-        facebook_handle: dto.facebook_handle ?? null,
         niche_description: dto.niche_description?.trim() || null,
         keywords: (dto.keywords ?? []).map((k) => k.trim().toLowerCase()).filter(Boolean),
         seed_accounts: [...new Set(seedAccounts)],
         website: dto.website ?? null,
         instagram_handle: dto.instagram_handle ?? null,
         tiktok_handle: dto.tiktok_handle ?? null,
-        youtube_handle: dto.youtube_handle ?? null,
       })
       .select()
       .single();

@@ -192,88 +192,6 @@ function normalizeTiktok(
   };
 }
 
-function normalizeYouTube(
-  item: Record<string, unknown>,
-): NormalizedContent | null {
-  const externalId =
-    asString(item.id) ??
-    asString(item.videoId) ??
-    asString(
-      (item as { snippet?: { resourceId?: { videoId?: string } } }).snippet
-        ?.resourceId?.videoId,
-    );
-  if (!externalId) return null;
-
-  const title = asString(item.title);
-  const description = asString(item.description ?? item.text);
-  const caption = [title, description].filter(Boolean).join('\n\n') || null;
-
-  const likes = asNumber(item.likes);
-  const comments = asNumber(item.commentsCount);
-  const views = asNumber(item.viewCount ?? item.viewCountText);
-  const duration = asNumber(item.duration);
-
-  // YouTube shorts vs long-video
-  const contentType: NormalizedContent['content_type'] =
-    duration > 0 && duration <= 60 ? 'short' : 'long_video';
-
-  return {
-    platform: 'youtube',
-    external_id: externalId,
-    post_url:
-      asString(item.url) ?? `https://www.youtube.com/watch?v=${externalId}`,
-    content_type: contentType,
-    caption,
-    hashtags: extractHashtags(caption),
-    mentions: extractMentions(caption),
-    media_urls: [],
-    thumbnail_url: asString(item.thumbnailUrl) ?? null,
-    duration_seconds: toSeconds(duration),
-    likes_count: likes,
-    comments_count: comments,
-    views_count: views,
-    shares_count: 0,
-    saves_count: 0,
-    engagement_rate: calcEngagementRate(likes, comments, views),
-    raw_data: item,
-    published_at: toIsoString(item.date ?? item.publishedAt),
-  };
-}
-
-function normalizeFacebook(
-  item: Record<string, unknown>,
-): NormalizedContent | null {
-  const externalId =
-    asString(item.postId) ?? asString(item.id) ?? asString(item.url);
-  if (!externalId) return null;
-
-  const caption = asString(item.text) ?? asString(item.message);
-  const likes = asNumber(item.likesCount ?? item.likes);
-  const comments = asNumber(item.commentsCount ?? item.comments);
-  const shares = asNumber(item.sharesCount ?? item.shares);
-
-  return {
-    platform: 'facebook',
-    external_id: externalId,
-    post_url: asString(item.url) ?? asString(item.topLevelUrl),
-    content_type: item.video ? 'video' : 'image',
-    caption,
-    hashtags: extractHashtags(caption),
-    mentions: extractMentions(caption),
-    media_urls: [],
-    thumbnail_url: asString(item.thumbnailUrl) ?? asString(item.previewImage),
-    duration_seconds: null,
-    likes_count: likes,
-    comments_count: comments,
-    views_count: 0,
-    shares_count: shares,
-    saves_count: 0,
-    engagement_rate: null,
-    raw_data: item,
-    published_at: toIsoString(item.time ?? item.publishedAt),
-  };
-}
-
 export function normalizeScrapedItems(
   platform: ScrapePlatform,
   items: Record<string, unknown>[],
@@ -287,12 +205,6 @@ export function normalizeScrapedItems(
         break;
       case 'tiktok':
         row = normalizeTiktok(item);
-        break;
-      case 'youtube':
-        row = normalizeYouTube(item);
-        break;
-      case 'facebook':
-        row = normalizeFacebook(item);
         break;
     }
     if (row) normalized.push(row);

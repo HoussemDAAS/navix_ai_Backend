@@ -28,8 +28,6 @@ const ACTOR_MEMORY_MB: Record<string, number> = {
   'apify/instagram-hashtag-scraper': 2048,
   'apify/instagram-scraper': 2048,
   'clockworks/tiktok-scraper': 2048,
-  'streamers/youtube-scraper': 2048,
-  'apify/facebook-pages-scraper': 2048,
 };
 
 export interface GateRunOptions {

@@ -6,6 +6,6 @@ export class ScrapeProfileDto {
   handle: string;
 
   @IsString()
-  @IsIn(['instagram', 'tiktok', 'youtube'])
+  @IsIn(['instagram', 'tiktok'])
   platform: string;
 }

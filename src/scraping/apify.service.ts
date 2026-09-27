@@ -8,8 +8,6 @@ import { ApifyGateService } from '../apify/apify-gate.service';
 export const APIFY_ACTORS: Record<ScrapePlatform, string> = {
   instagram: 'apify/instagram-scraper',
   tiktok: 'clockworks/tiktok-scraper',
-  youtube: 'streamers/youtube-scraper',
-  facebook: 'apify/facebook-pages-scraper',
 };
 
 interface ApifyWebhookConfig {
@@ -203,31 +201,6 @@ export class ApifyService {
           shouldDownloadVideos: false,
           shouldDownloadCovers: false,
           shouldDownloadSubtitles: false,
-        };
-      case 'youtube':
-        return {
-          startUrls: [
-            {
-              // Handles parsed from links may keep a "channel/UC…" or "c/name" prefix
-              url: /^(channel|c|user)\//i.test(cleanHandle)
-                ? `https://www.youtube.com/${cleanHandle}/videos`
-                : `https://www.youtube.com/@${cleanHandle}/videos`,
-            },
-          ],
-          maxResults: maxItems,
-          maxResultsShorts: Math.min(maxItems, 20),
-          downloadSubtitles: false,
-        };
-      case 'facebook':
-        return {
-          startUrls: [
-            {
-              url: cleanHandle.startsWith('profile.php')
-                ? `https://www.facebook.com/${cleanHandle}`
-                : `https://www.facebook.com/${cleanHandle}`,
-            },
-          ],
-          resultsLimit: maxItems,
         };
     }
   }

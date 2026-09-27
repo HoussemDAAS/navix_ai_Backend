@@ -2,11 +2,12 @@
  * Parses a pasted social profile link into a platform + handle.
  * Mirrored on the frontend in lib/social-links.ts — keep both in sync.
  *
- * Share links (vm.tiktok.com/…, facebook.com/share/…, instagram.com/share/…)
- * do not contain the handle: use resolveSocialLink() which follows the
- * redirect first.
+ * Navix supports Instagram and TikTok. Share links (vm.tiktok.com/…,
+ * instagram.com/share/…) do not contain the handle: use resolveSocialLink()
+ * which follows the redirect first.
  */
-export type SocialPlatform = 'instagram' | 'tiktok' | 'youtube' | 'facebook';
+export type SocialPlatform = 'instagram' | 'tiktok';
+export const SOCIAL_PLATFORMS: readonly SocialPlatform[] = ['instagram', 'tiktok'];
 
 export interface ParsedSocialLink {
   platform: SocialPlatform;
@@ -15,17 +16,11 @@ export interface ParsedSocialLink {
 }
 
 const IG_RESERVED = new Set([
-  'p', 'reel', 'reels', 'stories', 'explore', 'accounts', 'direct', 'tv', 'share', 'stories',
-]);
-const FB_RESERVED = new Set([
-  'share', 'reel', 'reels', 'watch', 'photo', 'photos', 'posts', 'videos', 'groups',
-  'events', 'marketplace', 'stories', 'story.php', 'permalink.php', 'people', 'pages',
-  'login', 'sharer', 'sharer.php', 'dialog', 'hashtag',
+  'p', 'reel', 'reels', 'stories', 'explore', 'accounts', 'direct', 'tv', 'share',
 ]);
 const TT_RESERVED = new Set(['share', 'video', 'tag', 'discover', 'search', 'music', 'foryou', 'explore', 't']);
-const YT_PREFIXES = new Set(['c', 'user', 'channel']);
 const HANDLE_RE = /^[A-Za-z0-9._-]{1,64}$/;
-const SHARE_HOSTS = /^(vm|vt)\.tiktok\.com$|^fb\.watch$|^l\.instagram\.com$/i;
+const SHARE_HOSTS = /^(vm|vt)\.tiktok\.com$|^l\.instagram\.com$/i;
 
 function toUrl(raw: string): URL | null {
   const input = (raw ?? '').trim();
@@ -49,10 +44,7 @@ export function isShareLink(raw: string): boolean {
   if (SHARE_HOSTS.test(host)) return true;
   const first = url.pathname.split('/').filter(Boolean)[0]?.toLowerCase();
   const site = cleanHost(host);
-  return (
-    first === 'share' &&
-    (site === 'facebook.com' || site === 'instagram.com' || site === 'tiktok.com' || site === 'fb.com')
-  );
+  return first === 'share' && (site === 'instagram.com' || site === 'tiktok.com');
 }
 
 export function parseSocialLink(raw: string): ParsedSocialLink | null {
@@ -80,44 +72,12 @@ export function parseSocialLink(raw: string): ParsedSocialLink | null {
     return { platform: 'tiktok', handle, url: `https://www.tiktok.com/@${handle}` };
   }
 
-  if (host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtu.be') {
-    if (!first) return null;
-    if (first.startsWith('@')) {
-      const handle = first.slice(1);
-      if (!HANDLE_RE.test(handle)) return null;
-      return { platform: 'youtube', handle, url: `https://www.youtube.com/@${handle}` };
-    }
-    if (YT_PREFIXES.has(first.toLowerCase()) && segments[1]) {
-      // Keep the prefix so the scraper can rebuild a valid URL (e.g. channel/UC...)
-      const handle = `${first.toLowerCase()}/${segments[1]}`;
-      return { platform: 'youtube', handle, url: `https://www.youtube.com/${handle}` };
-    }
-    return null;
-  }
-
-  if (host === 'facebook.com' || host.endsWith('.facebook.com') || host === 'fb.com') {
-    if (!first) return null;
-    if (first.toLowerCase() === 'profile.php') {
-      const id = url.searchParams.get('id');
-      if (!id || !/^\d+$/.test(id)) return null;
-      return {
-        platform: 'facebook',
-        handle: `profile.php?id=${id}`,
-        url: `https://www.facebook.com/profile.php?id=${id}`,
-      };
-    }
-    if (FB_RESERVED.has(first.toLowerCase())) return null;
-    const handle = first.replace(/^@/, '');
-    if (!HANDLE_RE.test(handle)) return null;
-    return { platform: 'facebook', handle, url: `https://www.facebook.com/${handle}` };
-  }
-
   return null;
 }
 
 /**
  * Parses a link, following the redirect of share links first
- * (vm.tiktok.com/…, facebook.com/share/…). Returns null when the final URL
+ * (vm.tiktok.com/…, instagram.com/share/…). Returns null when the final URL
  * does not identify a profile (e.g. a share link to a single post).
  */
 export async function resolveSocialLink(raw: string): Promise<ParsedSocialLink | null> {
@@ -178,6 +138,6 @@ export function splitSeed(seed: string): { platform: SocialPlatform; handle: str
   if (idx <= 0) return null;
   const platform = seed.slice(0, idx) as SocialPlatform;
   const handle = seed.slice(idx + 1);
-  if (!['instagram', 'tiktok', 'youtube', 'facebook'].includes(platform) || !handle) return null;
+  if (!SOCIAL_PLATFORMS.includes(platform) || !handle) return null;
   return { platform, handle };
 }

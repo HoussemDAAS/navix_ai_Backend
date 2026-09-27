@@ -27,15 +27,25 @@ interface InstagramProfileRaw {
   relatedProfiles?: Array<{ username?: string }>;
 }
 
-/** Raw shape from clockworks/tiktok-scraper dataset items (profile mode) */
+/**
+ * Raw shape from clockworks/tiktok-scraper dataset items (profile mode).
+ * The counters live on authorMeta (fans / following / video / heart); older
+ * exports carried an authorStats block, kept as a fallback.
+ */
 interface TiktokProfileRaw {
   authorMeta?: {
     name?: string;
     nickName?: string;
     signature?: string;
     avatar?: string;
+    originalAvatarUrl?: string;
     verified?: boolean;
+    fans?: number;
+    following?: number;
+    video?: number;
+    heart?: number;
     commerceUserInfo?: { commerceUser?: boolean };
+    ttSeller?: boolean;
   };
   authorStats?: {
     followerCount?: number;
@@ -987,12 +997,12 @@ export class ScraperService {
       platform: 'tiktok',
       full_name: meta?.nickName || meta?.name || '',
       biography: meta?.signature || '',
-      followers_count: stats?.followerCount ?? 0,
-      following_count: stats?.followingCount ?? 0,
-      posts_count: stats?.videoCount ?? 0,
-      avatar_url: meta?.avatar || '',
+      followers_count: meta?.fans ?? stats?.followerCount ?? 0,
+      following_count: meta?.following ?? stats?.followingCount ?? 0,
+      posts_count: meta?.video ?? stats?.videoCount ?? 0,
+      avatar_url: meta?.avatar || meta?.originalAvatarUrl || '',
       is_verified: meta?.verified ?? false,
-      is_business: meta?.commerceUserInfo?.commerceUser ?? false,
+      is_business: (meta?.commerceUserInfo?.commerceUser || meta?.ttSeller) ?? false,
       related_profiles: [],
     };
   }

@@ -21,8 +21,6 @@ export interface ProfileRow {
   persona: string | null;
   instagram_handle: string | null;
   tiktok_handle: string | null;
-  youtube_handle: string | null;
-  facebook_handle: string | null;
   entity_name: string | null;
   niche: string | null;
   country: string | null;
@@ -89,18 +87,12 @@ export class ProfilesService {
       payload.instagram_handle = dto.instagram_handle;
     if (dto.tiktok_handle !== undefined)
       payload.tiktok_handle = dto.tiktok_handle;
-    if (dto.youtube_handle !== undefined)
-      payload.youtube_handle = dto.youtube_handle;
-    if (dto.facebook_handle !== undefined)
-      payload.facebook_handle = dto.facebook_handle;
 
     // Pasted profile links → one handle per platform (replaces previous handles)
     if (dto.social_links !== undefined) {
       const handles: Record<SocialPlatform, string | null> = {
         instagram: null,
         tiktok: null,
-        youtube: null,
-        facebook: null,
       };
       for (const raw of dto.social_links) {
         if (!raw?.trim()) continue;
@@ -109,15 +101,13 @@ export class ProfilesService {
           throw new BadRequestException(
             isShareLink(raw)
               ? `"${raw}" is a share link to a post, not a profile. Open the profile and paste its link (e.g. tiktok.com/@username).`
-              : `Unrecognized profile link: "${raw}". Paste a full Instagram, TikTok, YouTube or Facebook profile URL.`,
+              : `Unrecognized profile link: "${raw}". Paste a full Instagram or TikTok profile URL.`,
           );
         }
         handles[parsed.platform] = parsed.handle;
       }
       payload.instagram_handle = handles.instagram;
       payload.tiktok_handle = handles.tiktok;
-      payload.youtube_handle = handles.youtube;
-      payload.facebook_handle = handles.facebook;
       if (Object.values(handles).some(Boolean)) payload.has_social_presence = true;
     }
     if (dto.has_social_presence !== undefined)
