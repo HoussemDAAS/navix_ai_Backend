@@ -2,6 +2,8 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 
@@ -28,11 +30,73 @@ export interface JobRecord {
   created_at: string;
 }
 
+// A job runs inside this process only. If the backend restarts mid-way its row would
+// stay "active" forever and every screen polling it would spin: on boot anything still
+// pending or active is declared interrupted, and every few minutes anything older than
+// its type's budget is declared hung.
+const STALE_JOB_BOOT_GRACE_MS = 60_000;
+const STALE_JOB_CHECK_INTERVAL_MS = 5 * 60_000;
+const STALE_JOB_MAX_AGE_MS: Record<JobType, number> = {
+  competitor_discovery: 30 * 60_000,
+  market_analysis: 10 * 60_000,
+  direction_generation: 10 * 60_000,
+  draft_generation: 10 * 60_000,
+  brand_memory_update: 10 * 60_000,
+};
+
 @Injectable()
-export class JobsService {
+export class JobsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(JobsService.name);
+  private staleTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly supabaseService: SupabaseService) {}
+
+  onModuleInit(): void {
+    void this.reconcileStaleJobs(true);
+    this.staleTimer = setInterval(() => {
+      void this.reconcileStaleJobs(false);
+    }, STALE_JOB_CHECK_INTERVAL_MS);
+    this.staleTimer.unref();
+  }
+
+  onModuleDestroy(): void {
+    if (this.staleTimer) clearInterval(this.staleTimer);
+  }
+
+  /**
+   * Mark jobs that can no longer be running as failed, so the UI stops waiting.
+   * On boot (`afterRestart`) every pending or active job older than a minute is
+   * dead by definition; afterwards only jobs past their type's budget are touched.
+   */
+  async reconcileStaleJobs(afterRestart: boolean): Promise<void> {
+    try {
+      const client = this.supabaseService.getClient();
+      const { data, error } = await client
+        .from('jobs')
+        .select('id, type, status, started_at, created_at')
+        .in('status', ['pending', 'active']);
+      if (error || !data) return;
+      const now = Date.now();
+      for (const job of data as Array<Pick<JobRecord, 'id' | 'type' | 'status' | 'started_at' | 'created_at'>>) {
+        const since = new Date(job.started_at ?? job.created_at).getTime();
+        const budget = afterRestart ? STALE_JOB_BOOT_GRACE_MS : (STALE_JOB_MAX_AGE_MS[job.type] ?? 10 * 60_000);
+        if (!Number.isFinite(since) || now - since < budget) continue;
+        const reason = afterRestart
+          ? 'Interrupted: the backend restarted while this job was running'
+          : 'Interrupted: the job exceeded its time budget';
+        await client
+          .from('jobs')
+          .update({ status: 'failed', error: reason, completed_at: new Date().toISOString() })
+          .eq('id', job.id)
+          .in('status', ['pending', 'active']);
+        this.logger.warn(
+          `Job ${job.id} (${job.type}) marked failed after ${Math.round((now - since) / 60_000)} min: ${reason}`,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(`Stale job reconciliation failed: ${(err as Error).message}`);
+    }
+  }
 
   async createJob(
     projectId: string,
