@@ -154,7 +154,24 @@ interface UnderstandRow {
   duration_seconds: number | null;
   likes_count: number | null;
   comments_count: number | null;
+  scraped_at: string | null;
   raw_data: Record<string, unknown> | null;
+}
+
+// Media links die: Instagram signs its CDN URLs with an `oe=<hex unix time>` expiry,
+// TikTok's CDN links last hours. A dead link is skipped instead of waited on.
+const MEDIA_LINK_MAX_AGE_MS = 3 * 24 * 3600_000;
+
+function mediaLinkAlive(url: string | null, scrapedAt: string | null): string | null {
+  if (!url) return null;
+  if (url.includes('api.apify.com/')) return url; // stored copy, does not expire
+  const oe = /[?&]oe=([0-9a-f]{6,10})(?:&|$)/i.exec(url);
+  if (oe) {
+    const expiresAt = parseInt(oe[1], 16) * 1000;
+    return Number.isFinite(expiresAt) && expiresAt > Date.now() + 60_000 ? url : null;
+  }
+  const age = scrapedAt ? Date.now() - new Date(scrapedAt).getTime() : Infinity;
+  return age < MEDIA_LINK_MAX_AGE_MS ? url : null;
 }
 
 @Injectable()
@@ -167,6 +184,8 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
   private refreshBootTimer?: ReturnType<typeof setTimeout>;
   private refreshTimer?: ReturnType<typeof setInterval>;
   private sweeping = false;
+  /** Projects with a content-understanding loop in flight */
+  private readonly understanding = new Set<string>();
 
   constructor(
     private readonly configService: ConfigService,
@@ -458,7 +477,7 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
     const { data } = await client
       .from('scraped_content')
       .select(
-        'id, project_id, platform, content_type, caption, thumbnail_url, duration_seconds, likes_count, comments_count, raw_data',
+        'id, project_id, platform, content_type, caption, thumbnail_url, duration_seconds, likes_count, comments_count, scraped_at, raw_data',
       )
       .in('id', contentIds)
       .is('understood_at', null);
@@ -471,6 +490,25 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
     if (rows.length === 0) return outcome;
 
     const projectId = rows[0].project_id;
+    // One reading loop per project: a second one would only compete for the same Whisper slots
+    if (this.understanding.has(projectId)) {
+      this.logger.log(`Content understanding already running for project ${projectId}; skipping`);
+      return outcome;
+    }
+    this.understanding.add(projectId);
+    try {
+      return await this.understandRows(projectId, rows, outcome);
+    } finally {
+      this.understanding.delete(projectId);
+    }
+  }
+
+  private async understandRows(
+    projectId: string,
+    rows: UnderstandRow[],
+    outcome: { attempted: number; transcribed: number; described: number },
+  ): Promise<{ attempted: number; transcribed: number; described: number }> {
+    const client = this.supabaseService.getClient();
     const changed: string[] = [];
     for (let i = 0; i < rows.length; i += UNDERSTAND_BATCH) {
       const batch = rows.slice(i, i + UNDERSTAND_BATCH);
@@ -527,15 +565,18 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
     let audioUrl: string | null = null;
     let imageCount: number | null = null;
     if (platform === 'instagram') {
-      videoUrl = typeof raw.videoUrl === 'string' ? raw.videoUrl : null;
-      audioUrl = typeof raw.audioUrl === 'string' ? raw.audioUrl : null;
+      videoUrl = mediaLinkAlive(typeof raw.videoUrl === 'string' ? raw.videoUrl : null, r.scraped_at);
+      audioUrl = mediaLinkAlive(typeof raw.audioUrl === 'string' ? raw.audioUrl : null, r.scraped_at);
       const images = Array.isArray(raw.images) ? raw.images : [];
       imageCount = images.length > 0 ? images.length : null;
     } else if (platform === 'tiktok') {
       const media = Array.isArray(raw.mediaUrls) ? (raw.mediaUrls as unknown[]) : [];
       const first = media.find((m): m is string => typeof m === 'string');
       const meta = (raw.videoMeta ?? {}) as Record<string, unknown>;
-      videoUrl = first ?? (typeof meta.downloadAddr === 'string' ? meta.downloadAddr : null);
+      videoUrl = mediaLinkAlive(
+        first ?? (typeof meta.downloadAddr === 'string' ? meta.downloadAddr : null),
+        r.scraped_at,
+      );
     }
     return {
       id: r.id,
