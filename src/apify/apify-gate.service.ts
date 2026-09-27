@@ -68,6 +68,11 @@ export class ApifyGateService {
           memory: opts.memory ?? ACTOR_MEMORY_MB[actorId],
           timeout: opts.timeoutSecs,
           webhooks: opts.webhooks,
+          // apify-client streams the actor's own log to our console by default over a
+          // long-lived HTTP connection; a reset on that socket surfaced as an uncaught
+          // error and took the whole backend down. We read results from the dataset,
+          // not from the log, so the stream is disabled.
+          log: null,
         }),
       );
     } finally {
