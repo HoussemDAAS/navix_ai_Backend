@@ -139,7 +139,8 @@ const THUMBNAIL_BACKFILL_BATCH = 80;
 // Content understanding: transcripts for videos, visual descriptions for images, so the
 // AI reasons from what a post says and shows rather than from its caption alone.
 const UNDERSTAND_ENABLED = process.env.CONTENT_UNDERSTANDING_ENABLED !== 'false';
-const UNDERSTAND_BATCH = 6; // posts per AI-service call (Whisper runs 4 at a time there)
+const UNDERSTAND_BATCH = 4; // posts per AI-service call: one wave of its 4 Whisper slots, 75 s each at most
+const UNDERSTAND_RETRY_PAUSE_MS = 20_000; // let a slow batch drain before sending the next one
 const UNDERSTAND_MAX_PER_RUN = Number(process.env.CONTENT_UNDERSTAND_MAX_PER_RUN) || 40;
 const UNDERSTAND_BACKLOG_PER_SWEEP = 40;
 
@@ -481,9 +482,15 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
         });
         results = response.items ?? [];
       } catch (err) {
-        this.logger.warn(`Content understanding batch failed: ${(err as Error).message}`);
+        this.logger.warn(
+          `Content understanding batch ${i / UNDERSTAND_BATCH + 1} failed: ${(err as Error).message}`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, UNDERSTAND_RETRY_PAUSE_MS));
         continue;
       }
+      this.logger.log(
+        `Content understanding batch ${i / UNDERSTAND_BATCH + 1}/${Math.ceil(rows.length / UNDERSTAND_BATCH)} done for project ${projectId}`,
+      );
       const stamp = new Date().toISOString();
       for (const r of results) {
         outcome.attempted++;
