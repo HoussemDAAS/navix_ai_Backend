@@ -1,4 +1,4 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, OnModuleInit } from '@nestjs/common';
 import {
   DiscoveryIngestService,
   type DiscoveryContext,
@@ -92,6 +92,10 @@ export interface ScrapedProfile {
 }
 
 /** Options passed from the controller / onboarding bootstrap */
+/** Interrupted discovery jobs are resumed shortly after boot, if they died recently */
+const RESUME_DELAY_MS = 15_000;
+const RESUME_MAX_AGE_MS = 6 * 3600_000;
+
 export interface DiscoveryOptions {
   niche: string;
   location?: string;
@@ -192,7 +196,7 @@ function toHashtagToken(h: string): string {
 }
 
 @Injectable()
-export class ScraperService {
+export class ScraperService implements OnModuleInit {
   private readonly logger = new Logger(ScraperService.name);
 
   constructor(
@@ -203,6 +207,90 @@ export class ScraperService {
     private readonly avatarStorage: AvatarStorageService,
     private readonly apify: ApifyGateService,
   ) {}
+
+  onModuleInit(): void {
+    setTimeout(() => {
+      void this.resumeInterruptedDiscovery();
+    }, RESUME_DELAY_MS).unref();
+  }
+
+  /**
+   * A discovery or expansion killed by a restart is run again from the project's
+   * own data, once, when it was the project's latest discovery job and it died in
+   * the last few hours. JobsService labels such jobs on boot; this picks them up.
+   */
+  async resumeInterruptedDiscovery(): Promise<void> {
+    try {
+      const client = this.supabaseService.getClient();
+      const since = new Date(Date.now() - RESUME_MAX_AGE_MS).toISOString();
+      const { data } = await client
+        .from('jobs')
+        .select('id, project_id, output')
+        .eq('type', 'competitor_discovery')
+        .eq('status', 'failed')
+        .like('error', 'Interrupted: the backend restarted%')
+        .gte('completed_at', since);
+      const jobs = (data ?? []) as Array<{ id: string; project_id: string; output: Record<string, unknown> | null }>;
+      for (const job of jobs) {
+        if (job.output?.resumed_at) continue;
+        const latest = await this.jobsService.getLatestJob(job.project_id, 'competitor_discovery');
+        await client
+          .from('jobs')
+          .update({ output: { ...(job.output ?? {}), resumed_at: new Date().toISOString() } })
+          .eq('id', job.id);
+        if (latest && latest.id !== job.id) continue; // the user already searched again
+        const { data: project } = await client
+          .from('projects')
+          .select('id, user_id, name, niche, location, persona, instagram_handle, tiktok_handle, niche_description, keywords, seed_accounts')
+          .eq('id', job.project_id)
+          .maybeSingle();
+        const p = (project ?? null) as {
+          id: string;
+          user_id: string;
+          name: string | null;
+          niche: string | null;
+          location: string | null;
+          persona: string | null;
+          instagram_handle: string | null;
+          tiktok_handle: string | null;
+          niche_description: string | null;
+          keywords: string[] | null;
+          seed_accounts: string[] | null;
+        } | null;
+        if (!p) continue;
+        const opts: DiscoveryOptions = {
+          niche: p.niche ?? '',
+          location: p.location ?? undefined,
+          projectId: p.id,
+          userId: p.user_id,
+          persona: p.persona ?? undefined,
+          entityName: p.name ?? undefined,
+          instagramHandle: p.instagram_handle ?? undefined,
+          tiktokHandle: p.tiktok_handle ?? undefined,
+          nicheDescription: p.niche_description ?? undefined,
+          keywords: p.keywords ?? undefined,
+          seedAccounts: p.seed_accounts ?? undefined,
+        };
+        const expandFrom = typeof job.output?.expand_from === 'string' ? job.output.expand_from : null;
+        if (expandFrom) {
+          const { data: comp } = await client
+            .from('competitors')
+            .select('handle, platform')
+            .eq('project_id', p.id)
+            .eq('handle', expandFrom)
+            .maybeSingle();
+          if (!comp) continue;
+          this.expandFromCompetitor(p.id, comp as { handle: string; platform: string }, opts);
+          this.logger.log(`Resumed interrupted expansion from @${expandFrom} for project ${p.id}`);
+        } else {
+          this.discoverCompetitors(opts);
+          this.logger.log(`Resumed interrupted discovery for project ${p.id}`);
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`Resume of interrupted discovery failed: ${(err as Error).message}`);
+    }
+  }
 
   /**
    * Competitor discovery pipeline. Returns immediately; the work runs in the

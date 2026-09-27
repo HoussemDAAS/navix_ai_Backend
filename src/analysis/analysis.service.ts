@@ -3,6 +3,7 @@ import {
   Logger,
   ForbiddenException,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { JobsService, JobRecord } from '../jobs/jobs.service';
@@ -34,8 +35,12 @@ const STALE_MAX_AGE_DAYS = 14;
 const AUTO_REFRESH_MIN_NEW_POSTS = 10;
 const AUTO_REFRESH_MIN_AGE_DAYS = 7;
 
+/** How long after boot the interrupted-job resume runs (JobsService has labelled them by then) */
+const RESUME_DELAY_MS = 20_000;
+const RESUME_MAX_AGE_MS = 6 * 3600_000;
+
 @Injectable()
-export class AnalysisService {
+export class AnalysisService implements OnModuleInit {
   private readonly logger = new Logger(AnalysisService.name);
 
   constructor(
@@ -44,6 +49,49 @@ export class AnalysisService {
     private readonly aiService: AiService,
     private readonly analyticsService: AnalyticsService,
   ) {}
+
+  onModuleInit(): void {
+    setTimeout(() => {
+      void this.resumeInterruptedAnalyses();
+    }, RESUME_DELAY_MS).unref();
+  }
+
+  /**
+   * A market analysis that died with a restart is simply run again. Only the
+   * latest analysis job of a project is resumed, only once, and only when it
+   * was interrupted in the last few hours.
+   */
+  async resumeInterruptedAnalyses(): Promise<void> {
+    try {
+      const client = this.supabaseService.getClient();
+      const since = new Date(Date.now() - RESUME_MAX_AGE_MS).toISOString();
+      const { data } = await client
+        .from('jobs')
+        .select('id, project_id, output')
+        .eq('type', 'market_analysis')
+        .eq('status', 'failed')
+        .like('error', 'Interrupted: the backend restarted%')
+        .gte('completed_at', since);
+      for (const job of (data ?? []) as Array<{ id: string; project_id: string; output: Record<string, unknown> | null }>) {
+        if (job.output?.resumed_at) continue;
+        const latest = await this.jobsService.getLatestJob(job.project_id, 'market_analysis');
+        const stamp = { ...(job.output ?? {}), resumed_at: new Date().toISOString() };
+        await client.from('jobs').update({ output: stamp }).eq('id', job.id);
+        if (latest && latest.id !== job.id) continue; // the user already ran it again
+        const { data: project } = await client
+          .from('projects')
+          .select('user_id')
+          .eq('id', job.project_id)
+          .maybeSingle();
+        const userId = ((project ?? null) as { user_id: string } | null)?.user_id;
+        if (!userId) continue;
+        await this.runAnalysis(job.project_id, userId);
+        this.logger.log(`Resumed interrupted market analysis for project ${job.project_id}`);
+      }
+    } catch (err) {
+      this.logger.warn(`Resume of interrupted analyses failed: ${(err as Error).message}`);
+    }
+  }
 
   async runAnalysis(projectId: string, userId: string): Promise<JobRecord> {
     // Step 1: Validate ownership
