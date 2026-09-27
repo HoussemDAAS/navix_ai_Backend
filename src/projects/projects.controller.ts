@@ -195,6 +195,22 @@ export class ProjectsController {
     return { message: data.started ? 'Refresh started' : 'Refresh not started', data };
   }
 
+  /** Read what the scraped posts say and show (transcripts, visual descriptions); runs in the background. */
+  @Post(':id/content/understand')
+  @HttpCode(HttpStatus.ACCEPTED)
+  async understandContent(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+    @Query('limit') limit?: string,
+  ) {
+    const data = await this.scrapingService.understandBacklog(
+      id,
+      user.id,
+      Math.min(Math.max(Number(limit) || 40, 1), 300),
+    );
+    return { message: `${data.queued} posts queued for reading`, data };
+  }
+
   /** Embed every captioned post that has no embedding yet (RAG coverage). */
   @Post(':id/embeddings/backfill')
   async backfillEmbeddings(

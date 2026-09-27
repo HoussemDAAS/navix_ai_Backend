@@ -198,7 +198,9 @@ export class ApifyService {
         return {
           profiles: [cleanHandle],
           resultsPerPage: maxItems,
-          shouldDownloadVideos: false,
+          // TikTok's own CDN links refuse server-side downloads; stored copies give
+          // the content-understanding pass a durable file to transcribe.
+          shouldDownloadVideos: true,
           shouldDownloadCovers: false,
           shouldDownloadSubtitles: false,
         };

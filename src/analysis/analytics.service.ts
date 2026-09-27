@@ -28,6 +28,9 @@ export interface ContentRow {
   published_at: string | null;
   thumbnail_url: string | null;
   post_url: string | null;
+  /** Filled by the content-understanding pass when the post was read */
+  transcript?: string | null;
+  visual_summary?: string | null;
 }
 
 interface CompetitorRow {

@@ -26,6 +26,9 @@ interface ScrapedContentRow {
   mentions: string[] | null;
   content_type: string | null;
   competitor_id: string | null;
+  /** What the post says (video transcript) and shows (vision description), when read */
+  transcript?: string | null;
+  visual_summary?: string | null;
 }
 
 interface EmbeddingInsert {
@@ -66,7 +69,7 @@ export class EmbeddingsService {
     const { data: row, error } = await client
       .from('scraped_content')
       .select(
-        'id, project_id, source_type, platform, caption, hashtags, mentions, content_type, competitor_id',
+        'id, project_id, source_type, platform, caption, hashtags, mentions, content_type, competitor_id, transcript, visual_summary',
       )
       .eq('id', scrapedContentId)
       .single();
@@ -152,7 +155,11 @@ export class EmbeddingsService {
   async backfillProject(projectId: string): Promise<{ missing: number; chunks: number }> {
     const client = this.supabaseService.getClient();
     const [{ data: posts, error: postsErr }, { data: done, error: doneErr }] = await Promise.all([
-      client.from('scraped_content').select('id, caption').eq('project_id', projectId).limit(5000),
+      client
+        .from('scraped_content')
+        .select('id, caption, transcript, visual_summary')
+        .eq('project_id', projectId)
+        .limit(5000),
       client
         .from('embeddings')
         .select('scraped_content_id')
@@ -166,8 +173,19 @@ export class EmbeddingsService {
     const embedded = new Set(
       ((done ?? []) as Array<{ scraped_content_id: string }>).map((r) => r.scraped_content_id),
     );
-    const missing = ((posts ?? []) as Array<{ id: string; caption: string | null }>)
-      .filter((p) => (p.caption ?? '').trim().length > 0 && !embedded.has(p.id))
+    const missing = (
+      (posts ?? []) as Array<{
+        id: string;
+        caption: string | null;
+        transcript: string | null;
+        visual_summary: string | null;
+      }>
+    )
+      .filter(
+        (p) =>
+          ((p.caption ?? '') + (p.transcript ?? '') + (p.visual_summary ?? '')).trim().length > 0 &&
+          !embedded.has(p.id),
+      )
       .map((p) => p.id);
 
     if (missing.length === 0) return { missing: 0, chunks: 0 };
@@ -490,6 +508,8 @@ export class EmbeddingsService {
   private buildTextFromScrapedContent(row: ScrapedContentRow): string {
     const parts: string[] = [];
     if (row.caption) parts.push(row.caption);
+    if (row.transcript) parts.push(`Spoken in the video: ${row.transcript}`);
+    if (row.visual_summary) parts.push(`Visual: ${row.visual_summary}`);
     if (row.hashtags && row.hashtags.length > 0) {
       parts.push(`Hashtags: ${row.hashtags.map((h) => `#${h}`).join(' ')}`);
     }

@@ -11,6 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ApifyService, APIFY_ACTORS } from './apify.service';
 import { AnalysisService } from '../analysis/analysis.service';
+import { AiService, ContentUnderstandItem, ContentUnderstandingResult } from '../ai/ai.service';
 import { EmbeddingsService } from '../embeddings/embeddings.service';
 import { AvatarStorageService } from '../scraper/avatar-storage.service';
 import { ScraperService } from '../scraper/scraper.service';
@@ -135,6 +136,26 @@ const REFRESH_SWEEP_MAX_ACCOUNTS = 12; // per sweep, per kind — protects the A
 const THUMBNAIL_BACKFILL_MAX_AGE_DAYS = 14;
 const THUMBNAIL_BACKFILL_BATCH = 80;
 
+// Content understanding: transcripts for videos, visual descriptions for images, so the
+// AI reasons from what a post says and shows rather than from its caption alone.
+const UNDERSTAND_ENABLED = process.env.CONTENT_UNDERSTANDING_ENABLED !== 'false';
+const UNDERSTAND_BATCH = 6; // posts per AI-service call (Whisper runs 4 at a time there)
+const UNDERSTAND_MAX_PER_RUN = Number(process.env.CONTENT_UNDERSTAND_MAX_PER_RUN) || 40;
+const UNDERSTAND_BACKLOG_PER_SWEEP = 40;
+
+interface UnderstandRow {
+  id: string;
+  project_id: string;
+  platform: string | null;
+  content_type: string | null;
+  caption: string | null;
+  thumbnail_url: string | null;
+  duration_seconds: number | null;
+  likes_count: number | null;
+  comments_count: number | null;
+  raw_data: Record<string, unknown> | null;
+}
+
 @Injectable()
 export class ScrapingService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ScrapingService.name);
@@ -154,6 +175,7 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
     private readonly avatarStorage: AvatarStorageService,
     private readonly scraperService: ScraperService,
     private readonly analysisService: AnalysisService,
+    private readonly aiService: AiService,
   ) {
     this.webhookUrl = this.configService.get<string>(
       'APIFY_SCRAPE_WEBHOOK_URL',
@@ -420,6 +442,132 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Read what posts actually say and show: a Whisper transcript for videos, a
+   * vision description for images (and for videos nobody speaks in), then
+   * re-embed them so retrieval carries the real content. Most engaging posts
+   * first; every attempted post is stamped so it is never re-read.
+   */
+  async understandPosts(
+    contentIds: string[],
+    cap = UNDERSTAND_MAX_PER_RUN,
+  ): Promise<{ attempted: number; transcribed: number; described: number }> {
+    const outcome = { attempted: 0, transcribed: 0, described: 0 };
+    if (!UNDERSTAND_ENABLED || contentIds.length === 0) return outcome;
+    const client = this.supabaseService.getClient();
+    const { data } = await client
+      .from('scraped_content')
+      .select(
+        'id, project_id, platform, content_type, caption, thumbnail_url, duration_seconds, likes_count, comments_count, raw_data',
+      )
+      .in('id', contentIds)
+      .is('understood_at', null);
+    const rows = ((data ?? []) as UnderstandRow[])
+      .sort(
+        (a, b) =>
+          (b.likes_count ?? 0) + (b.comments_count ?? 0) - ((a.likes_count ?? 0) + (a.comments_count ?? 0)),
+      )
+      .slice(0, cap);
+    if (rows.length === 0) return outcome;
+
+    const projectId = rows[0].project_id;
+    const changed: string[] = [];
+    for (let i = 0; i < rows.length; i += UNDERSTAND_BATCH) {
+      const batch = rows.slice(i, i + UNDERSTAND_BATCH);
+      let results: ContentUnderstandingResult[] = [];
+      try {
+        const response = await this.aiService.understandContent({
+          project_id: projectId,
+          items: batch.map((r) => this.toUnderstandItem(r)),
+        });
+        results = response.items ?? [];
+      } catch (err) {
+        this.logger.warn(`Content understanding batch failed: ${(err as Error).message}`);
+        continue;
+      }
+      const stamp = new Date().toISOString();
+      for (const r of results) {
+        outcome.attempted++;
+        const patch: Record<string, unknown> = { understood_at: stamp };
+        if (r.transcript) {
+          patch.transcript = r.transcript;
+          outcome.transcribed++;
+        }
+        if (r.visual_summary) {
+          patch.visual_summary = r.visual_summary;
+          outcome.described++;
+        }
+        if (r.language) patch.media_language = r.language;
+        const { error } = await client.from('scraped_content').update(patch).eq('id', r.id);
+        if (!error && (r.transcript || r.visual_summary)) changed.push(r.id);
+        if (r.error) this.logger.debug(`Understanding ${r.id}: ${r.error}`);
+      }
+    }
+    if (changed.length > 0) {
+      await this.embeddingsService.embedScrapedContentBatch(changed).catch((err) => {
+        this.logger.warn(`Re-embedding understood posts failed: ${(err as Error).message}`);
+      });
+    }
+    this.logger.log(
+      `Content understanding for project ${projectId}: ${outcome.transcribed} transcribed, ${outcome.described} described, ${outcome.attempted} attempted`,
+    );
+    return outcome;
+  }
+
+  private toUnderstandItem(r: UnderstandRow): ContentUnderstandItem {
+    const raw = r.raw_data ?? {};
+    const platform = (r.platform || 'instagram').toLowerCase();
+    let videoUrl: string | null = null;
+    let audioUrl: string | null = null;
+    let imageCount: number | null = null;
+    if (platform === 'instagram') {
+      videoUrl = typeof raw.videoUrl === 'string' ? raw.videoUrl : null;
+      audioUrl = typeof raw.audioUrl === 'string' ? raw.audioUrl : null;
+      const images = Array.isArray(raw.images) ? raw.images : [];
+      imageCount = images.length > 0 ? images.length : null;
+    } else if (platform === 'tiktok') {
+      const media = Array.isArray(raw.mediaUrls) ? (raw.mediaUrls as unknown[]) : [];
+      const first = media.find((m): m is string => typeof m === 'string');
+      const meta = (raw.videoMeta ?? {}) as Record<string, unknown>;
+      videoUrl = first ?? (typeof meta.downloadAddr === 'string' ? meta.downloadAddr : null);
+    }
+    return {
+      id: r.id,
+      platform,
+      content_type: r.content_type,
+      caption: r.caption ? r.caption.slice(0, 500) : null,
+      video_url: videoUrl,
+      audio_url: audioUrl,
+      thumbnail_url: r.thumbnail_url,
+      duration_seconds: r.duration_seconds,
+      image_count: imageCount,
+    };
+  }
+
+  /** Posts of a project never read yet, most engaging first; runs in the background. */
+  async understandBacklog(
+    projectId: string,
+    userId: string | null,
+    limit = UNDERSTAND_BACKLOG_PER_SWEEP,
+  ): Promise<{ queued: number }> {
+    if (userId) await this.assertProjectOwnership(projectId, userId);
+    const client = this.supabaseService.getClient();
+    const { data } = await client
+      .from('scraped_content')
+      .select('id')
+      .eq('project_id', projectId)
+      .is('understood_at', null)
+      .order('likes_count', { ascending: false, nullsFirst: false })
+      .limit(limit);
+    const ids = ((data ?? []) as Array<{ id: string }>).map((r) => r.id);
+    if (ids.length > 0) {
+      void this.understandPosts(ids, ids.length).catch((err) => {
+        this.logger.warn(`Backlog understanding failed for ${projectId}: ${(err as Error).message}`);
+      });
+    }
+    return { queued: ids.length };
+  }
+
+  /**
    * Called from webhooks.controller when Apify webhook fires.
    * Also used by the polling fallback.
    */
@@ -514,6 +662,14 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
     this.persistThumbnails(insertedIds).catch((err) => {
       this.logger.warn(
         `scrape_job=${scrapeJobId} thumbnail persistence failed: ${(err as Error).message}`,
+      );
+    });
+
+    // Read what the new posts say and show while their media links are still
+    // alive (transcripts, visual descriptions), then re-embed them (non-blocking).
+    this.understandPosts(insertedIds).catch((err) => {
+      this.logger.warn(
+        `scrape_job=${scrapeJobId} content understanding failed: ${(err as Error).message}`,
       );
     });
 
@@ -842,6 +998,11 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
         await this.backfillThumbnails(p.id).catch((err) => {
           this.logger.warn(
             `Thumbnail backfill failed for project ${p.id}: ${(err as Error).message}`,
+          );
+        });
+        await this.understandBacklog(p.id, null).catch((err) => {
+          this.logger.warn(
+            `Content understanding backlog failed for project ${p.id}: ${(err as Error).message}`,
           );
         });
         await this.analysisService.refreshIfStale(p.id, p.user_id);

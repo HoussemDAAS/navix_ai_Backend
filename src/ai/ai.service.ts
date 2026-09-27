@@ -155,6 +155,38 @@ export interface WeeklyDigestResponse {
   idea?: { title: string; why: string; format?: string | null; studio_prompt: string } | null;
 }
 
+export interface ContentUnderstandItem {
+  id: string;
+  platform: string;
+  content_type: string | null;
+  caption: string | null;
+  video_url: string | null;
+  audio_url: string | null;
+  thumbnail_url: string | null;
+  duration_seconds: number | null;
+  image_count: number | null;
+}
+
+export interface ContentUnderstandInput {
+  project_id: string;
+  items: ContentUnderstandItem[];
+}
+
+export interface ContentUnderstandingResult {
+  id: string;
+  transcript?: string | null;
+  visual_summary?: string | null;
+  language?: string | null;
+  error?: string | null;
+}
+
+export interface ContentUnderstandResponse {
+  items?: ContentUnderstandingResult[];
+}
+
+/** A batch of transcriptions takes longer than a single generation */
+const CONTENT_UNDERSTAND_TIMEOUT_MS = 170_000;
+
 type AiRequestBody =
   | MarketAnalysisInput
   | DirectionGenerationInput
@@ -162,7 +194,8 @@ type AiRequestBody =
   | BrandMemoryInput
   | BrandKitDeriveInput
   | CreatorMemoryUpdateInput
-  | WeeklyDigestInput;
+  | WeeklyDigestInput
+  | ContentUnderstandInput;
 
 @Injectable()
 export class AiService {
@@ -224,15 +257,22 @@ export class AiService {
     return result as unknown as WeeklyDigestResponse;
   }
 
+  /** Transcribe and describe a batch of scraped posts (what they say and show). */
+  async understandContent(data: ContentUnderstandInput): Promise<ContentUnderstandResponse> {
+    const result = await this.callEndpoint('/content/understand', data, CONTENT_UNDERSTAND_TIMEOUT_MS);
+    return result as unknown as ContentUnderstandResponse;
+  }
+
   private async callEndpoint(
     path: string,
     body: AiRequestBody,
+    timeoutMs = this.timeoutMs,
   ): Promise<Record<string, unknown>> {
     const url = `${this.baseUrl}${path}`;
     this.logger.log(`Calling AI service: POST ${url}`);
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(url, {
@@ -253,7 +293,7 @@ export class AiService {
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
         throw new Error(
-          `AI service timeout after ${this.timeoutMs}ms on ${path}`,
+          `AI service timeout after ${timeoutMs}ms on ${path}`,
         );
       }
       throw new Error(

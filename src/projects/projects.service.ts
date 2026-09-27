@@ -359,7 +359,7 @@ export class ProjectsService {
     const [{ data: posts }, { data: profileRow }, existing] = await Promise.all([
       client
         .from('scraped_content')
-        .select('caption, likes_count, comments_count, views_count, content_type, hashtags, published_at')
+        .select('caption, transcript, likes_count, comments_count, views_count, content_type, hashtags, published_at')
         .eq('project_id', projectId)
         .eq('source_type', 'self')
         .order('published_at', { ascending: false, nullsFirst: false })
@@ -374,6 +374,7 @@ export class ProjectsService {
 
     type PostRow = {
       caption: string | null;
+      transcript: string | null;
       likes_count: number | null;
       comments_count: number | null;
       views_count: number | null;
@@ -415,7 +416,13 @@ export class ProjectsService {
         niche: (project.niche as string) || profile?.niche || null,
       },
       posts: sample.map((p) => ({
-        caption: (p.caption as string).trim(),
+        // The spoken words carry the voice at least as much as the caption
+        caption: [
+          (p.caption as string).trim(),
+          p.transcript ? `Spoken: ${p.transcript.slice(0, 600)}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
         likes: p.likes_count,
         comments: p.comments_count,
         views: p.views_count,

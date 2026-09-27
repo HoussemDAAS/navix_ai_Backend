@@ -19,7 +19,7 @@ import {
 
 const INSIGHT_TTL_MS = 7 * 24 * 3600 * 1000;
 const POST_COLUMNS =
-  'id, post_url, thumbnail_url, caption, content_type, hashtags, likes_count, comments_count, views_count, shares_count, saves_count, engagement_rate, duration_seconds, published_at, competitor_id, source_type, platform';
+  'id, post_url, thumbnail_url, caption, transcript, visual_summary, content_type, hashtags, likes_count, comments_count, views_count, shares_count, saves_count, engagement_rate, duration_seconds, published_at, competitor_id, source_type, platform';
 
 export interface CompetitorInsight {
   summary: string;
@@ -63,6 +63,8 @@ function topPostsForPrompt(posts: ContentRow[], limit = 10) {
     .map((p) => ({
       format: p.content_type,
       caption: p.caption ? p.caption.slice(0, 220) : null,
+      spoken: p.transcript ? p.transcript.slice(0, 400) : undefined,
+      visual: p.visual_summary ? p.visual_summary.slice(0, 200) : undefined,
       likes: p.likes_count ?? 0,
       comments: p.comments_count ?? 0,
       views: p.views_count ?? 0,

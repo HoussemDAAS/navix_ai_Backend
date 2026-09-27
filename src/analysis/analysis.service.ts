@@ -125,7 +125,7 @@ export class AnalysisService implements OnModuleInit {
 
     const { data: content, error: sigError } = await client
       .from('scraped_content')
-      .select('competitor_id, platform, caption, likes_count, views_count, published_at')
+      .select('competitor_id, platform, caption, transcript, visual_summary, likes_count, views_count, published_at')
       .eq('project_id', projectId)
       .eq('source_type', 'competitor')
       .in('competitor_id', competitorIds)
@@ -137,11 +137,20 @@ export class AnalysisService implements OnModuleInit {
       throw new Error(`Failed to fetch scraped content: ${sigError.message}`);
     }
 
-    // Shape rows into the SignalData contract the AI service expects
+    // Shape rows into the SignalData contract the AI service expects. The caption
+    // carries what the post says and shows too, so hooks come from real speech.
+    const describe = (row: Record<string, unknown>): string | null => {
+      const parts = [
+        (row.caption as string | null) ?? '',
+        row.transcript ? `[Spoken] ${String(row.transcript).slice(0, 700)}` : '',
+        row.visual_summary ? `[Visual] ${String(row.visual_summary).slice(0, 300)}` : '',
+      ].filter((p) => p.trim().length > 0);
+      return parts.length > 0 ? parts.join('\n') : null;
+    };
     const signals = ((content ?? []) as Record<string, unknown>[]).map((row) => ({
       competitor_handle: handleById.get(row.competitor_id as string) ?? 'unknown',
       platform: ((row.platform as string) ?? 'instagram').toLowerCase(),
-      caption: (row.caption as string) ?? null,
+      caption: describe(row),
       likes_count: (row.likes_count as number) ?? null,
       views_count: (row.views_count as number) ?? null,
       published_at: (row.published_at as string) ?? null,
