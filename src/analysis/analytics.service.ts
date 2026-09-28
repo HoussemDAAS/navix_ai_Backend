@@ -363,6 +363,8 @@ export class AnalyticsService {
     persona: string | null;
     account_model: Record<string, unknown> | null;
     creator_memory: string | null;
+    /** Who reads the output: the brand itself, or the agency that manages it */
+    audience: 'owner' | 'agency';
   }> {
     const client = this.supabaseService.getClient();
     try {
@@ -376,24 +378,27 @@ export class AnalyticsService {
         persona: string | null;
         creator_memory: unknown;
       } | null;
-      if (!row) return { persona: null, account_model: null, creator_memory: null };
+      if (!row) return { persona: null, account_model: null, creator_memory: null, audience: 'owner' };
 
       const { data: profile } = await client
         .from('profiles')
         .select('persona')
         .eq('id', row.user_id)
         .maybeSingle();
-      const persona =
-        ((profile ?? null) as { persona: string | null } | null)?.persona ?? row.persona ?? null;
+      const accountType = ((profile ?? null) as { persona: string | null } | null)?.persona ?? null;
+      // The project's type first: an agency's client is a brand or a creator, and
+      // that is what the agents must reason about, not the agency behind it.
+      const persona = row.persona ?? accountType;
 
       const model = await this.getFieldAnalytics(projectId, row.user_id).catch(() => null);
       return {
         persona,
         account_model: model as unknown as Record<string, unknown> | null,
         creator_memory: formatCreatorMemory(row.creator_memory),
+        audience: accountType === 'agency' ? 'agency' : 'owner',
       };
     } catch {
-      return { persona: null, account_model: null, creator_memory: null };
+      return { persona: null, account_model: null, creator_memory: null, audience: 'owner' };
     }
   }
 
@@ -771,6 +776,7 @@ export class AnalyticsService {
         const result = await this.aiService.weeklyDigest({
           project_id: projectId,
           persona: grounding.persona,
+          audience: grounding.audience,
           account_model: grounding.account_model,
           creator_memory: grounding.creator_memory,
           brand_kit: (brandKit as Record<string, unknown> | null) ?? null,

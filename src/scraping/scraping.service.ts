@@ -71,6 +71,7 @@ interface ProfileMinimal {
   keywords?: string[] | null;
   seed_accounts?: string[] | null;
   has_social_presence?: boolean | null;
+  entity_logo_url?: string | null;
   // The brand's own account as captured during onboarding
   followers_count?: number | null;
   following_count?: number | null;
@@ -961,6 +962,8 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
         seed_accounts: profile.seed_accounts ?? [],
         // First project of the account → the one single-brand personas land on
         is_primary: true,
+        // The logo uploaded during onboarding belongs to the brand, i.e. the project
+        logo_url: profile.entity_logo_url ?? null,
         // The brand's own account, as captured during onboarding
         followers_count: profile.followers_count ?? null,
         following_count: profile.following_count ?? null,

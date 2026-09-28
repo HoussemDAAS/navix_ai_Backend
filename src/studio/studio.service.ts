@@ -685,7 +685,8 @@ export class StudioService {
     const row = (project ?? null) as { user_id: string; persona: string | null; creator_memory: unknown } | null;
     if (!row) return;
     const { data: profile } = await client.from('profiles').select('persona').eq('id', row.user_id).maybeSingle();
-    const persona = ((profile ?? null) as { persona: string | null } | null)?.persona ?? row.persona ?? null;
+    // The project's type first: an agency's client is a brand or a creator, not an agency
+    const persona = row.persona ?? ((profile ?? null) as { persona: string | null } | null)?.persona ?? null;
     const current = normalizeCreatorMemory(row.creator_memory);
 
     const transcript = ((history ?? []) as Array<Pick<MessageRow, 'role' | 'content' | 'artifacts'>>).map((m) => ({

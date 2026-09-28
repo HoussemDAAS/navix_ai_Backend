@@ -142,6 +142,8 @@ export interface BrandKitDeriveResponse {
 export interface WeeklyDigestInput {
   project_id: string;
   persona: string | null;
+  /** Who reads the digest: the brand itself ('owner') or the agency managing it ('agency') */
+  audience?: 'owner' | 'agency';
   account_model: Record<string, unknown> | null;
   creator_memory: string | null;
   brand_kit: Record<string, unknown> | null;

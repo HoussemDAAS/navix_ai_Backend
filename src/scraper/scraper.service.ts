@@ -401,7 +401,7 @@ export class ScraperService implements OnModuleInit {
         if (own) {
           ctx.ownBio = own.biography || null;
           ctx.ownFollowers = own.followers_count || null;
-          await this.refreshOwnProfile(opts.userId, own);
+          await this.refreshOwnIdentity(opts.projectId, opts.userId, own);
         }
       }
 
@@ -717,16 +717,32 @@ export class ScraperService implements OnModuleInit {
     };
   }
 
-  /** The judge needs the user's own bio/followers; discovery sets them in-process, expansion reads the profile row. */
+  /**
+   * The judge needs the brand's own bio/followers; discovery sets them in-process,
+   * expansion reads them back. The project row is the brand under analysis (an
+   * agency's client is not the agency); the profile only fills legacy gaps.
+   */
   private async loadOwnProfileContext(userId: string | undefined, ctx: DiscoveryContext): Promise<void> {
-    if (!userId || ctx.ownBio) return;
-    const { data } = await this.supabaseService
-      .getClient()
-      .from('profiles')
-      .select('biography, followers_count')
-      .eq('id', userId)
-      .maybeSingle();
-    const row = (data ?? null) as { biography: string | null; followers_count: number | null } | null;
+    if (ctx.ownBio) return;
+    const client = this.supabaseService.getClient();
+    type Identity = { biography: string | null; followers_count: number | null };
+    let row: Identity | null = null;
+    if (ctx.projectId) {
+      const { data } = await client
+        .from('projects')
+        .select('biography, followers_count')
+        .eq('id', ctx.projectId)
+        .maybeSingle();
+      row = (data ?? null) as Identity | null;
+    }
+    if ((!row || (!row.biography && !row.followers_count)) && userId) {
+      const { data } = await client
+        .from('profiles')
+        .select('biography, followers_count')
+        .eq('id', userId)
+        .maybeSingle();
+      row = (data ?? null) as Identity | null;
+    }
     if (row) {
       ctx.ownBio = row.biography;
       ctx.ownFollowers = row.followers_count;
@@ -867,28 +883,44 @@ export class ScraperService implements OnModuleInit {
     return out;
   }
 
-  /** Keep the user's own profile fresh (bio, counts, permanent avatar). */
-  private async refreshOwnProfile(userId: string | undefined, own: ScrapedProfile): Promise<void> {
-    if (!userId) return;
+  /**
+   * Keep the brand's own identity fresh (bio, counts, permanent avatar). It lives
+   * on the PROJECT, the brand under analysis. Only single-brand accounts mirror
+   * it to their profile: an agency's profile is the agency, never its client.
+   */
+  private async refreshOwnIdentity(
+    projectId: string | undefined,
+    userId: string | undefined,
+    own: ScrapedProfile,
+  ): Promise<void> {
+    if (!projectId && !userId) return;
     try {
       const client = this.supabaseService.getClient();
       const avatar = own.avatar_url
-        ? (await this.avatarStorage.persist(own.avatar_url, `profiles/${userId}`)) ?? own.avatar_url
+        ? (await this.avatarStorage.persist(own.avatar_url, `projects/${projectId ?? userId}`)) ?? own.avatar_url
         : null;
-      const { error } = await client
-        .from('profiles')
-        .update({
-          biography: own.biography || null,
-          followers_count: own.followers_count || null,
-          following_count: own.following_count || null,
-          posts_count: own.posts_count || null,
-          is_verified: own.is_verified,
-          avatar_url: avatar,
-        })
-        .eq('id', userId);
-      if (error) this.logger.warn(`Profile refresh failed: ${error.message}`);
+      const patch = {
+        biography: own.biography || null,
+        followers_count: own.followers_count || null,
+        following_count: own.following_count || null,
+        posts_count: own.posts_count || null,
+        is_verified: own.is_verified,
+        avatar_url: avatar,
+      };
+      if (projectId) {
+        const { error } = await client.from('projects').update(patch).eq('id', projectId);
+        if (error) this.logger.warn(`Project identity refresh failed: ${error.message}`);
+      }
+      if (userId) {
+        const { data: profile } = await client.from('profiles').select('persona').eq('id', userId).maybeSingle();
+        const persona = ((profile ?? null) as { persona: string | null } | null)?.persona ?? null;
+        if (persona !== 'agency') {
+          const { error } = await client.from('profiles').update(patch).eq('id', userId);
+          if (error) this.logger.warn(`Profile refresh failed: ${error.message}`);
+        }
+      }
     } catch (err) {
-      this.logger.warn(`Profile refresh failed: ${(err as Error).message}`);
+      this.logger.warn(`Identity refresh failed: ${(err as Error).message}`);
     }
   }
 

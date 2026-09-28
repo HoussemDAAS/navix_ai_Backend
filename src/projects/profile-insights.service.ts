@@ -318,16 +318,22 @@ export class ProfileInsightsService {
     posts: ContentRow[],
   ): Promise<CompetitorInsight> {
     const brand = await this.brandContext(project);
+    const agency = await this.readByAgency(project);
     return this.openaiService.chatJson<CompetitorInsight>(
       `You are Navix, a senior social media strategist writing an intelligence read on ONE competitor account ` +
-        `for a brand (the user). You receive the brand's context and the competitor's REAL scraped posts and stats. ` +
+        (agency
+          ? `for a brand managed by the reader's agency. You receive the brand's context and the competitor's REAL scraped posts and stats. `
+          : `for a brand (the user). You receive the brand's context and the competitor's REAL scraped posts and stats. `) +
         `Ground every claim in the provided data — cite concrete numbers, formats and actual post topics; never invent. ` +
-        `Address the user as "you". Write tight, specific sentences a marketer would pay for. ` +
+        (agency
+          ? `The reader is the agency, so name the brand ("${String(brand.name ?? 'the brand')}") in the third person; never "you". `
+          : `Address the user as "you". `) +
+        `Write tight, specific sentences a marketer would pay for. ` +
         `Respond with JSON: {"summary": "2 sentences: what this account is and its content strategy", ` +
         `"what_works": ["3 bullets, each naming a real content pattern WITH a number from the data"], ` +
         `"weaknesses": ["1-2 real gaps you can see in their content"], ` +
-        `"threat": {"level": "low|medium|high", "reason": "1 sentence comparing them to the user"}, ` +
-        `"steal": ["2 concrete post ideas the user can adapt to their own voice, based on what works for this account"]}`,
+        `"threat": {"level": "low|medium|high", "reason": "1 sentence comparing them to the brand"}, ` +
+        `"steal": ["2 concrete post ideas the brand can adapt to its own voice, based on what works for this account"]}`,
       JSON.stringify({
         brand,
         competitor: {
@@ -353,10 +359,18 @@ export class ProfileInsightsService {
     stats: AccountAnalytics,
     posts: ContentRow[],
   ): Promise<SelfInsight> {
+    // The profile row carries the ACCOUNT type: an agency reads its client's dossier
+    const agency = profile.persona === 'agency';
     return this.openaiService.chatJson<SelfInsight>(
-      `You are Navix, a senior social media strategist giving a brand an honest read of their OWN account. ` +
+      (agency
+        ? `You are Navix, a senior social media strategist giving an agency an honest read of a client's account ("${String(project.name ?? 'the brand')}"). `
+        : `You are Navix, a senior social media strategist giving a brand an honest read of their OWN account. `) +
         `You receive their real scraped posts and stats. Ground everything in the data — concrete numbers, ` +
-        `formats, actual topics; never invent. Address them as "you". Be honest about weaknesses; they want truth. ` +
+        `formats, actual topics; never invent. ` +
+        (agency
+          ? `Name the brand and use the third person ("they", "their"); never "you". `
+          : `Address them as "you". `) +
+        `Be honest about weaknesses; they want truth. ` +
         `Respond with JSON: {"summary": "2 sentences on what this account is today", ` +
         `"voice": "1-2 sentences describing the tone and recurring topics of their posts", ` +
         `"what_works": ["3 bullets naming real patterns WITH numbers"], ` +
@@ -380,6 +394,17 @@ export class ProfileInsightsService {
         top_posts: topPostsForPrompt(posts),
       }),
     );
+  }
+
+  /** True when the account that owns the project is an agency reading a client's data. */
+  private async readByAgency(project: Record<string, unknown>): Promise<boolean> {
+    const client = this.supabaseService.getClient();
+    const { data } = await client
+      .from('profiles')
+      .select('persona')
+      .eq('id', project.user_id as string)
+      .maybeSingle();
+    return ((data ?? null) as { persona: string | null } | null)?.persona === 'agency';
   }
 
   private async brandContext(project: Record<string, unknown>): Promise<Record<string, unknown>> {

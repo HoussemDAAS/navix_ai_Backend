@@ -1,4 +1,5 @@
 import {
+  IsIn,
   IsNotEmpty,
   IsOptional,
   IsString,
@@ -24,9 +25,19 @@ export class CreateProjectDto {
   @IsOptional()
   language?: string;
 
+  /**
+   * What the project IS: 'ecommerce' (a brand) or 'creator'. Agencies choose it
+   * per client; single-brand accounts inherit their account type.
+   */
   @IsString()
   @IsOptional()
+  @IsIn(['ecommerce', 'creator', 'agency'])
   persona?: string;
+
+  /** Uploaded logo as a data URL (stored in Supabase Storage) or an existing URL */
+  @IsString()
+  @IsOptional()
+  logo_url?: string;
 
   @IsString()
   @IsOptional()

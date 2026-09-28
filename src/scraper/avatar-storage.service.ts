@@ -44,12 +44,44 @@ export class AvatarStorageService implements OnModuleInit {
   }
 
   /**
+   * Stores an uploaded image given as a base64 data URL (the logo pickers
+   * produce those) as avatars/<key>. Returns the public URL, or null.
+   */
+  async persistDataUrl(dataUrl: string | null | undefined, key: string): Promise<string | null> {
+    if (!dataUrl || !this.ready) return null;
+    const match = /^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i.exec(dataUrl);
+    if (!match) return null;
+    const contentType = match[1].toLowerCase();
+    const bytes = Buffer.from(match[2], 'base64');
+    if (bytes.length === 0 || bytes.length > 2 * 1024 * 1024) return null;
+    const ext = contentType.includes('png')
+      ? 'png'
+      : contentType.includes('svg')
+        ? 'svg'
+        : contentType.includes('webp')
+          ? 'webp'
+          : 'jpg';
+    const path = `${key}.${ext}`;
+    const client = this.supabaseService.getClient();
+    const { error } = await client.storage
+      .from(BUCKET)
+      .upload(path, bytes, { contentType, upsert: true });
+    if (error) {
+      this.logger.warn(`Logo upload failed for ${key}: ${error.message}`);
+      return null;
+    }
+    const { data } = client.storage.from(BUCKET).getPublicUrl(path);
+    return `${data.publicUrl}?v=${Date.now()}`;
+  }
+
+  /**
    * Downloads the image at sourceUrl and stores it as avatars/<key>.
    * Returns the permanent public URL, or null if anything fails.
    */
   async persist(sourceUrl: string | null | undefined, key: string): Promise<string | null> {
     if (!sourceUrl) return null;
     if (this.isStorageUrl(sourceUrl)) return sourceUrl;
+    if (sourceUrl.startsWith('data:')) return this.persistDataUrl(sourceUrl, key);
     if (!this.ready) return null;
 
     const controller = new AbortController();

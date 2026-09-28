@@ -8,6 +8,7 @@ import { SupabaseService } from '../supabase/supabase.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { ScrapingService } from '../scraping/scraping.service';
 import { ScraperService } from '../scraper/scraper.service';
+import { AvatarStorageService } from '../scraper/avatar-storage.service';
 import {
   resolveSocialLink,
   resolveSeedAccount,
@@ -46,6 +47,7 @@ export class ProfilesService {
     private readonly supabaseService: SupabaseService,
     private readonly scrapingService: ScrapingService,
     private readonly scraperService: ScraperService,
+    private readonly avatarStorage: AvatarStorageService,
   ) {}
 
   async getProfile(userId: string): Promise<ProfileRow> {
@@ -144,8 +146,14 @@ export class ProfilesService {
 
     // Entity fields
     if (dto.entity_name !== undefined) payload.entity_name = dto.entity_name;
-    if (dto.entity_logo_url !== undefined)
-      payload.entity_logo_url = dto.entity_logo_url;
+    if (dto.entity_logo_url !== undefined) {
+      // The logo picker sends a base64 data URL; keep a real file in storage,
+      // not a 200 KB string in the row. If storage is unavailable, keep the data URL.
+      payload.entity_logo_url = dto.entity_logo_url?.startsWith('data:')
+        ? ((await this.avatarStorage.persistDataUrl(dto.entity_logo_url, `logos/profiles/${userId}`)) ??
+          dto.entity_logo_url)
+        : dto.entity_logo_url;
+    }
     if (dto.country !== undefined) payload.country = dto.country;
     if (dto.website_url !== undefined) payload.website_url = dto.website_url;
     if (dto.niche !== undefined) payload.niche = dto.niche;
@@ -181,9 +189,12 @@ export class ProfilesService {
     this.logger.log(`Profile updated for user ${userId}`);
 
     // Auto-create the user's default project and kick off self-scrape (if handles exist)
-    // when onboarding finishes — works for every persona, including agency.
+    // when onboarding finishes. Brands and creators ARE their project; an agency is
+    // not: it manages client projects, each created (and scraped, and discovered)
+    // from the Clients page, so its onboarding creates nothing.
+    const isAgency = (dto.persona ?? updated.persona) === 'agency';
     const shouldBootstrapWorkspace =
-      dto.onboarding_step === 'scraping' || dto.onboarding_completed === true;
+      !isAgency && (dto.onboarding_step === 'scraping' || dto.onboarding_completed === true);
 
     if (shouldBootstrapWorkspace && !this.bootstrappedUsers.has(userId)) {
       this.bootstrappedUsers.add(userId);

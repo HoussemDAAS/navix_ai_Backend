@@ -39,10 +39,11 @@ const INSIGHTS_TTL_MS = 30 * 60 * 1000; // regenerate at most every 30 min
 
 type ProjectPersona = 'ecommerce' | 'agency' | 'creator';
 /**
- * Projects per account. A creator has exactly one by design (their own brand);
- * e-commerce and agency accounts get more once paid plans exist.
+ * Projects per ACCOUNT type. A creator or a store has exactly one (their own
+ * brand); an agency manages its clients, one project each, until paid plans
+ * raise the number.
  */
-const PROJECT_LIMITS: Record<ProjectPersona, number> = { creator: 1, ecommerce: 1, agency: 1 };
+const PROJECT_LIMITS: Record<ProjectPersona, number> = { creator: 1, ecommerce: 1, agency: 5 };
 const DEFAULT_PROJECT_LIMIT = 1;
 
 function projectLimitFor(persona: string | null | undefined): number {
@@ -222,23 +223,32 @@ export class ProjectsService {
   async createProject(dto: CreateProjectDto, userId: string) {
     const client = this.supabaseService.getClient();
 
-    // Every persona gets one project until paid plans raise the limit. The first
-    // project is the primary one — where single-brand accounts land.
+    // The ACCOUNT type sets the limit; the PROJECT type says what the project is.
+    // A brand or a creator is their own project. An agency manages clients, and
+    // picks for each one whether it is a brand or a creator: that type, not the
+    // agency's, is what every AI feature reasons from.
     const [{ data: profile }, { count }] = await Promise.all([
       client.from('profiles').select('persona').eq('id', userId).maybeSingle(),
       client.from('projects').select('id', { count: 'exact', head: true }).eq('user_id', userId),
     ]);
-    const persona =
-      dto.persona ?? ((profile as { persona: string | null } | null)?.persona ?? null);
+    const accountType = (profile as { persona: string | null } | null)?.persona ?? dto.persona ?? null;
     const existing = count ?? 0;
-    const limit = projectLimitFor(persona);
+    const limit = projectLimitFor(accountType);
     if (existing >= limit) {
       throw new ForbiddenException(
-        persona === 'creator'
-          ? 'A creator account has one project — your own brand. Switch to a Marketing Agency account to manage several.'
-          : `Your plan includes ${limit} project${limit === 1 ? '' : 's'} for now — adding more clients or stores is coming with paid plans.`,
+        accountType === 'creator'
+          ? 'A creator account has one project: your own brand. Switch to a Marketing Agency account to manage several.'
+          : accountType === 'agency'
+            ? `Your plan includes ${limit} clients for now. More are coming with paid plans.`
+            : `Your plan includes ${limit} project${limit === 1 ? '' : 's'} for now. Adding more stores is coming with paid plans.`,
       );
     }
+    const persona =
+      accountType === 'agency'
+        ? dto.persona === 'creator'
+          ? 'creator'
+          : 'ecommerce'
+        : (accountType ?? dto.persona ?? null);
 
     const seedAccounts = (
       await Promise.all((dto.seed_accounts ?? []).map((s) => resolveSeedAccount(s)))
@@ -266,9 +276,70 @@ export class ProjectsService {
       this.logger.error('Failed to create project', error);
       throw new Error(error.message);
     }
+    const project = data as Record<string, unknown>;
+    const projectId = project.id as string;
 
-    this.logger.log(`Project created: ${data.id}`);
-    return data;
+    // The uploaded logo lives on the project it belongs to, as a real file in storage
+    if (dto.logo_url) {
+      const stored = dto.logo_url.startsWith('data:')
+        ? await this.avatarStorage.persistDataUrl(dto.logo_url, `logos/projects/${projectId}`)
+        : dto.logo_url;
+      if (stored) {
+        await client.from('projects').update({ logo_url: stored }).eq('id', projectId);
+        project.logo_url = stored;
+      }
+    }
+
+    this.logger.log(`Project created: ${projectId} (${persona ?? 'untyped'}, account ${accountType ?? 'unknown'})`);
+    this.bootstrapProject(project, userId);
+    return project;
+  }
+
+  /**
+   * What onboarding does for a brand, done for a project created from the
+   * Clients page: read the account's own posts, then find its competitors.
+   * Fire and forget: the competitors page polls for the results.
+   */
+  private bootstrapProject(project: Record<string, unknown>, userId: string): void {
+    const projectId = project.id as string;
+    const handles = {
+      instagram: (project.instagram_handle as string | null) ?? undefined,
+      tiktok: (project.tiktok_handle as string | null) ?? undefined,
+    };
+    const platforms = (['instagram', 'tiktok'] as const).filter((p) => !!handles[p]);
+    if (platforms.length > 0) {
+      this.scrapingService
+        .scrapeSelf(projectId, userId, { platforms: [...platforms], handles })
+        .catch((err) =>
+          this.logger.warn(`Own-account read failed for project ${projectId}: ${(err as Error).message}`),
+        );
+    }
+
+    const niche = (project.niche as string | null) ?? '';
+    const description = (project.niche_description as string | null) ?? '';
+    if (!niche && !description) return;
+    try {
+      void Promise.resolve(
+        this.scraperService.discoverCompetitors({
+          niche: niche || description.slice(0, 120),
+          location: (project.location as string | null) ?? undefined,
+          projectId,
+          userId,
+          persona: (project.persona as string | null) ?? undefined,
+          entityName: (project.name as string | null) ?? undefined,
+          instagramHandle: handles.instagram,
+          tiktokHandle: handles.tiktok,
+          nicheDescription: description || undefined,
+          keywords: (project.keywords as string[] | null) ?? undefined,
+          seedAccounts: (project.seed_accounts as string[] | null) ?? undefined,
+        }),
+      ).catch((err: Error) =>
+        this.logger.warn(`Discovery failed for project ${projectId}: ${err.message}`),
+      );
+      this.logger.log(`Competitor discovery started for project ${projectId}`);
+    } catch (err) {
+      this.logger.warn(`Discovery failed to start for project ${projectId}: ${(err as Error).message}`);
+    }
   }
 
   async getProject(projectId: string, userId: string) {
@@ -409,7 +480,8 @@ export class ProjectsService {
 
     const derived = await this.aiService.deriveBrandKit({
       project_id: projectId,
-      persona: profile?.persona ?? (project.persona as string | null) ?? null,
+      // The project's type (a client may be a brand or a creator), not the account's
+      persona: (project.persona as string | null) ?? profile?.persona ?? null,
       profile: {
         name: (project.name as string) || profile?.entity_name || profile?.full_name || null,
         bio: (project.biography as string | null) ?? null,
@@ -664,7 +736,7 @@ export class ProjectsService {
       // The project is the brand under analysis; the profile only fills legacy gaps.
       me: {
         name: (project.name as string) || profile?.entity_name || profile?.full_name || 'unknown',
-        persona: profile?.persona ?? (project.persona as string | null) ?? 'unknown',
+        persona: (project.persona as string | null) ?? profile?.persona ?? 'unknown',
         niche: (project.niche as string) || profile?.niche || 'unknown',
         country: (project.location as string | null) ?? profile?.country ?? 'unknown',
         bio: (project.biography as string | null) ?? profile?.biography ?? null,
