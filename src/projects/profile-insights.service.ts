@@ -218,7 +218,14 @@ export class ProfileInsightsService {
       posts,
     );
 
-    const me = { ...p, ...acct };
+    // The dossier is the project's: its name and type, never the account's (an agency is not its client)
+    const me = {
+      ...p,
+      ...acct,
+      full_name: (project.name as string | null) ?? p.full_name,
+      entity_name: (project.name as string | null) ?? p.entity_name,
+      persona: (project.persona as string | null) ?? p.persona,
+    };
     const insight = await this.resolveInsight<SelfInsight>({
       cached: (project.ai_insight as SelfInsight | null) ?? (p.ai_insight as SelfInsight | null) ?? null,
       cachedAt: (project.ai_insight_at as string | null) ?? (p.ai_insight_at as string | null) ?? null,
