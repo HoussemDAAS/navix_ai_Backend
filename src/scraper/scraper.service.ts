@@ -1,4 +1,11 @@
-import { Injectable, Logger, BadRequestException, OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+  OnModuleInit,
+} from '@nestjs/common';
 import {
   DiscoveryIngestService,
   type DiscoveryContext,
@@ -212,6 +219,20 @@ export class ScraperService implements OnModuleInit {
     setTimeout(() => {
       void this.resumeInterruptedDiscovery();
     }, RESUME_DELAY_MS).unref();
+  }
+
+  /** 404 when the project does not exist, 403 when it belongs to someone else. */
+  async assertProjectOwner(projectId: string, userId: string): Promise<void> {
+    const { data, error } = await this.supabaseService
+      .getClient()
+      .from('projects')
+      .select('id, user_id')
+      .eq('id', projectId)
+      .maybeSingle();
+    if (error || !data) throw new NotFoundException('Project not found');
+    if ((data as { user_id: string }).user_id !== userId) {
+      throw new ForbiddenException('You do not have access to this project');
+    }
   }
 
   /**

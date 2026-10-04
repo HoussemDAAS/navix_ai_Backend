@@ -23,7 +23,8 @@ export interface NormalizedContent {
   media_urls: string[];
   thumbnail_url: string | null;
   duration_seconds: number | null;
-  likes_count: number;
+  /** null when the platform hides the count (Instagram reports -1) */
+  likes_count: number | null;
   comments_count: number;
   views_count: number;
   shares_count: number;
@@ -135,12 +136,12 @@ function normalizeInstagram(
       (item.videoUrl ? [item.videoUrl as string] : []),
     thumbnail_url: asString(item.displayUrl) ?? asString(item.thumbnailUrl),
     duration_seconds: toSeconds(item.videoDuration),
-    likes_count: likes,
+    likes_count: likes < 0 ? null : likes, // -1 = hidden by the platform
     comments_count: comments,
     views_count: views,
     shares_count: 0,
     saves_count: 0,
-    engagement_rate: calcEngagementRate(likes, comments, views),
+    engagement_rate: calcEngagementRate(Math.max(likes, 0), comments, views),
     raw_data: item,
     published_at: toIsoString(item.timestamp ?? item.takenAt),
   };
@@ -181,12 +182,12 @@ function normalizeTiktok(
     media_urls: [],
     thumbnail_url: videoMeta?.coverUrl ?? null,
     duration_seconds: toSeconds(videoMeta?.duration),
-    likes_count: likes,
+    likes_count: likes < 0 ? null : likes, // -1 = hidden by the platform
     comments_count: comments,
     views_count: views,
     shares_count: shares,
     saves_count: asNumber(item.collectCount),
-    engagement_rate: calcEngagementRate(likes, comments, views),
+    engagement_rate: calcEngagementRate(Math.max(likes, 0), comments, views),
     raw_data: item,
     published_at: toIsoString(item.createTimeISO ?? item.createTime),
   };

@@ -965,6 +965,15 @@ export class StudioService {
     return `Hi ${name}. I've read your ${self.posts} posts: mostly ${self.dominant_format ?? 'post'}s, ${cadence}${rate != null ? `, ${rate.toFixed(1)}% engagement${vsText}` : ''}.${bestText} What are we making today — one reel, a carousel, or a series for the week? Give me the topic, or paste a reference you like.`;
   }
 
+  /**
+   * Ownership and session checks for the streamed route, run by the controller
+   * before the SSE headers go out so a refused call gets a real 403/404.
+   */
+  async assertSessionAccess(projectId: string, sessionId: string, userId: string): Promise<void> {
+    await this.ownProject(projectId, userId);
+    await this.loadSession(projectId, sessionId);
+  }
+
   private async ownProject(projectId: string, userId: string): Promise<Record<string, unknown>> {
     const { data, error } = await this.supabaseService
       .getClient()

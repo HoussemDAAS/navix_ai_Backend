@@ -125,7 +125,9 @@ export class ProfileInsightsService {
       cached: (c.ai_insight as CompetitorInsight) ?? null,
       cachedAt: (c.ai_insight_at as string) ?? null,
       refresh,
-      hasData: posts.length > 0 || !!c.biography,
+      // Wait for scraped posts: a read written from the bio alone invents claims
+      // about posting rhythm and engagement that nothing supports yet.
+      hasData: posts.length > 0,
       generate: () => this.generateCompetitorInsight(project, c, stats, posts),
       persist: async (value) => {
         await client

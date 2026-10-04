@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ApifyClient, WebhookEventType } from 'apify-client';
-import { createHmac } from 'crypto';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { ScrapePlatform } from './dto/scrape-self.dto';
 import { ApifyGateService } from '../apify/apify-gate.service';
 
@@ -75,14 +75,21 @@ export class ApifyService {
     return createHmac('sha256', this.webhookSecret).update(jobId).digest('hex');
   }
 
+  /**
+   * A webhook is accepted only when the secret is configured and the signature
+   * matches (constant-time compare). Without a secret nothing is accepted: the
+   * polling fallback still completes the jobs.
+   */
   verifySignature(jobId: string, signature: string): boolean {
     if (!this.webhookSecret) {
       this.logger.warn(
-        'APIFY_WEBHOOK_SECRET not set — accepting webhook without verification',
+        'APIFY_WEBHOOK_SECRET not set — rejecting webhook (polling fallback will finish the job)',
       );
-      return true;
+      return false;
     }
-    return this.signJobId(jobId) === signature;
+    const expected = Buffer.from(this.signJobId(jobId), 'utf8');
+    const given = Buffer.from(signature ?? '', 'utf8');
+    return expected.length === given.length && timingSafeEqual(expected, given);
   }
 
   /**

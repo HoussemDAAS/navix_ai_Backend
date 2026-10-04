@@ -628,6 +628,14 @@ export class ScrapingService implements OnModuleInit, OnModuleDestroy {
       );
       return;
     }
+    // The run must be the one this job started: a replayed or forged webhook
+    // cannot attach another run's dataset to this project.
+    if (job.apify_run_id && job.apify_run_id !== runId) {
+      this.logger.warn(
+        `scrape_job=${scrapeJobId} ignored run ${runId}: job belongs to run ${job.apify_run_id}`,
+      );
+      return;
+    }
 
     // Always verify the run by calling Apify directly — never trust webhook payload blindly
     const runStatus = await this.apifyService.getRunStatus(runId);

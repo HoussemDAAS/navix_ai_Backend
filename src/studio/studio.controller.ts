@@ -129,6 +129,8 @@ export class StudioController {
     @Body() dto: SendMessageDto,
     @Res() res: Response,
   ) {
+    // Refuse before the stream starts: once headers are flushed the status is fixed at 201
+    await this.studioService.assertSessionAccess(id, sessionId, user.id);
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');

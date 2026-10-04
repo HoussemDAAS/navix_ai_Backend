@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Controller,
   Post,
   Body,
@@ -11,6 +12,7 @@ import { ScraperService } from './scraper.service';
 import { DiscoverCompetitorsDto } from './dto/discover-competitors.dto';
 import { ScrapeProfileDto } from './dto/scrape-profile.dto';
 import { SupabaseAuthGuard } from '../auth/supabase-auth.guard';
+import { CurrentUser, type AuthUser } from '../auth/current-user.decorator';
 import { resolveSeedAccount } from '../common/social-links';
 
 @Controller('scraper')
@@ -22,9 +24,18 @@ export class ScraperController {
   @Post('discover')
   @HttpCode(HttpStatus.CREATED)
   @UseGuards(SupabaseAuthGuard)
-  async discover(@Body() dto: DiscoverCompetitorsDto) {
+  async discover(
+    @Body() dto: DiscoverCompetitorsDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    // Discovery writes competitors and the own profile into the project, so the
+    // project named in the body must belong to the caller.
+    if (!dto.project_id) {
+      throw new BadRequestException('project_id is required');
+    }
+    await this.scraperService.assertProjectOwner(dto.project_id, user.id);
     this.logger.log(
-      `Discovery request — niche: ${dto.niche}, location: ${dto.location || 'none'}, project: ${dto.project_id || 'none'}`,
+      `Discovery request — niche: ${dto.niche}, location: ${dto.location || 'none'}, project: ${dto.project_id}`,
     );
 
     const seeds = (
