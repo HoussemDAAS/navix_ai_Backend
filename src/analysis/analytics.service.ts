@@ -407,7 +407,7 @@ export class AnalyticsService {
 
     const { data: project, error: pErr } = await client
       .from('projects')
-      .select('id, user_id, instagram_handle, tiktok_handle')
+      .select('id, user_id, instagram_handle, tiktok_handle, avatar_url, followers_count')
       .eq('id', projectId)
       .single();
     if (pErr || !project) throw new NotFoundException(`Project ${projectId} not found`);
@@ -469,10 +469,27 @@ export class AnalyticsService {
           (b.engagement_rate ?? 0) - (a.engagement_rate ?? 0),
       );
 
-    // Self account (project handles; profile bio lives on profiles)
-    const selfHandle =
-      (project as { instagram_handle: string | null }).instagram_handle ??
-      (project as { tiktok_handle: string | null }).tiktok_handle;
+    // Self account: handles, avatar and audience live on the project row; the
+    // profile keeps a copy for single-brand accounts and serves as the fallback.
+    const proj = project as {
+      instagram_handle: string | null;
+      tiktok_handle: string | null;
+      avatar_url: string | null;
+      followers_count: number | null;
+    };
+    const selfHandle = proj.instagram_handle ?? proj.tiktok_handle;
+    let selfAvatar = proj.avatar_url ?? null;
+    let selfFollowers = proj.followers_count ?? null;
+    if (selfRows.length > 0 && (!selfAvatar || selfFollowers == null)) {
+      const { data: profile } = await client
+        .from('profiles')
+        .select('avatar_url, followers_count')
+        .eq('id', userId)
+        .maybeSingle();
+      const p = (profile ?? null) as { avatar_url: string | null; followers_count: number | null } | null;
+      selfAvatar = selfAvatar ?? p?.avatar_url ?? null;
+      selfFollowers = selfFollowers ?? p?.followers_count ?? null;
+    }
     const self =
       selfRows.length > 0
         ? accountAnalytics(
@@ -480,8 +497,8 @@ export class AnalyticsService {
               id: null,
               handle: selfHandle ?? 'you',
               platform: selfRows[0].platform?.toUpperCase() ?? 'INSTAGRAM',
-              avatar_url: null,
-              followers_count: null,
+              avatar_url: selfAvatar,
+              followers_count: selfFollowers,
               tracked: false,
             },
             selfRows,
