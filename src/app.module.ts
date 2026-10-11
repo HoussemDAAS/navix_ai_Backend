@@ -14,6 +14,7 @@ import { DirectionsModule } from './directions/directions.module';
 import { DraftsModule } from './drafts/drafts.module';
 import { CalendarModule } from './calendar/calendar.module';
 import { StudioModule } from './studio/studio.module';
+import { KnowledgeModule } from './knowledge/knowledge.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { StudioModule } from './studio/studio.module';
     DraftsModule,
     CalendarModule,
     StudioModule,
+    KnowledgeModule,
   ],
 })
 export class AppModule {}

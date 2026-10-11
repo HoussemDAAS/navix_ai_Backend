@@ -20,8 +20,8 @@ async function bootstrap() {
   const logger = new Logger('Bootstrap');
 
   // Base64 logo uploads can be 2-3 MB. Default 100kb body limit rejects them silently.
-  app.use(json({ limit: '10mb' }));
-  app.use(urlencoded({ extended: true, limit: '10mb' }));
+  app.use(json({ limit: '40mb' }));
+  app.use(urlencoded({ extended: true, limit: '40mb' }));
 
   // Allowed browser origins: CORS_ORIGINS="https://app.example.com,https://www.example.com"
   // in production, the local dev hosts when the variable is not set.

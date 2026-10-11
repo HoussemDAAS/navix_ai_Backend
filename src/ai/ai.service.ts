@@ -189,6 +189,54 @@ export interface ContentUnderstandResponse {
 /** A batch of transcriptions takes longer than a single generation */
 const CONTENT_UNDERSTAND_TIMEOUT_MS = 170_000;
 
+// ── Knowledge library (admin) ──
+
+export interface KnowledgeTagInput {
+  items: Array<{ id: string; type: string; content: string; title?: string | null }>;
+}
+
+export interface KnowledgeTagResponse {
+  tags: Array<{
+    id: string;
+    title?: string | null;
+    language?: string | null;
+    script?: string | null;
+    field?: string | null;
+    format?: string | null;
+    goal?: string | null;
+    funnel?: string | null;
+    note?: string | null;
+  }>;
+}
+
+export interface ArticleDistillInput {
+  url: string;
+  text: string;
+  field?: string | null;
+}
+
+export interface ArticleDistillResponse {
+  title: string;
+  language: string;
+  principles: Array<{ type: string; title: string; content: string; format?: string | null; goal?: string | null }>;
+}
+
+export interface ReferenceExtractInput {
+  reference_id: string;
+  kind: string;
+  url: string;
+  mime_type?: string | null;
+  title?: string | null;
+  /** Keep the whole text (library imports); Studio references stay capped */
+  full?: boolean;
+}
+
+export interface ReferenceExtractResponse {
+  extracted_text: string;
+  summary: string;
+  meta: Record<string, unknown>;
+}
+
 type AiRequestBody =
   | MarketAnalysisInput
   | DirectionGenerationInput
@@ -197,7 +245,10 @@ type AiRequestBody =
   | BrandKitDeriveInput
   | CreatorMemoryUpdateInput
   | WeeklyDigestInput
-  | ContentUnderstandInput;
+  | ContentUnderstandInput
+  | KnowledgeTagInput
+  | ArticleDistillInput
+  | ReferenceExtractInput;
 
 @Injectable()
 export class AiService {
@@ -263,6 +314,24 @@ export class AiService {
   async understandContent(data: ContentUnderstandInput): Promise<ContentUnderstandResponse> {
     const result = await this.callEndpoint('/content/understand', data, CONTENT_UNDERSTAND_TIMEOUT_MS);
     return result as unknown as ContentUnderstandResponse;
+  }
+
+  /** Tags for library items the admin imported (language, script, field, format, goal, funnel). */
+  async tagKnowledge(data: KnowledgeTagInput): Promise<KnowledgeTagResponse> {
+    const result = await this.callEndpoint('/knowledge/tag', data, 900_000);
+    return result as unknown as KnowledgeTagResponse;
+  }
+
+  /** Reusable principles distilled from an article the admin pointed at. */
+  async distillArticle(data: ArticleDistillInput): Promise<ArticleDistillResponse> {
+    const result = await this.callEndpoint('/knowledge/distill', data, 150_000);
+    return result as unknown as ArticleDistillResponse;
+  }
+
+  /** Readable text of an uploaded file, through the same reader the Studio uses. */
+  async extractText(data: Omit<ReferenceExtractInput, 'reference_id'>): Promise<ReferenceExtractResponse> {
+    const result = await this.callEndpoint('/references/extract', { reference_id: 'knowledge', ...data }, 600_000);
+    return result as unknown as ReferenceExtractResponse;
   }
 
   private async callEndpoint(
