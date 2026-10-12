@@ -414,15 +414,36 @@ export class KnowledgeService {
   ): Promise<KnowledgeItemRow[]> {
     const name = file.originalname.toLowerCase();
     const isText = file.mimetype.startsWith('text/') || TEXT_EXTENSIONS.some((ext) => name.endsWith(ext));
+    const isDocx =
+      name.endsWith('.docx') ||
+      file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
     let text: string;
     if (isText) {
       text = file.buffer.toString('utf8').replace(/^﻿/, '');
+    } else if (isDocx) {
+      text = await this.extractDocxText(file);
+    } else if (name.endsWith('.doc')) {
+      throw new BadRequestException('Old .doc files are not readable here: save the file as .docx or PDF and upload it again.');
     } else if (file.mimetype === 'application/pdf' || name.endsWith('.pdf')) {
       text = await this.extractPdfText(file);
     } else {
-      throw new BadRequestException('Use a text, Markdown, CSV or PDF file, or paste the content.');
+      throw new BadRequestException('Use a text, Markdown, CSV, Word (.docx) or PDF file, or paste the content.');
     }
     return this.importText({ ...params, text }, createdBy);
+  }
+
+  /** Word documents: paragraphs and table cells as plain text, one paragraph per line. */
+  private async extractDocxText(file: KnowledgeUpload): Promise<string> {
+    const mammoth = await import('mammoth');
+    try {
+      const result = await mammoth.extractRawText({ buffer: file.buffer });
+      const text = (result.value ?? '').replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+      if (!text) throw new BadRequestException('No readable text found in that Word file');
+      return text;
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      throw new BadRequestException(`Could not read that Word file: ${(err as Error).message}`);
+    }
   }
 
   /** PDFs go through the same reader the Studio uses for shared references. */
