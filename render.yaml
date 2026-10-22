@@ -1,0 +1,46 @@
+# Render Blueprint for the Navix API (NestJS).
+# Dashboard: New > Blueprint > pick this repo. Variables marked "sync: false" are asked once at creation.
+services:
+  - type: web
+    name: navix-api
+    runtime: node
+    region: frankfurt
+    plan: free
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm run start:prod
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 24.12.0
+      - key: SUPABASE_URL
+        value: https://ituecleocjmzyowwnqrm.supabase.co
+      - key: SUPABASE_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: APIFY_TOKEN
+        sync: false
+      - key: APIFY_WEBHOOK_SECRET
+        generateValue: true
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ADMIN_EMAILS
+        sync: false
+      # URL of the AI service on Render, for example https://navix-ai-service.onrender.com
+      - key: AI_SERVICE_URL
+        sync: false
+      # Public URL of THIS service + path, for example https://navix-api.onrender.com/webhooks/apify/competitors
+      - key: APIFY_WEBHOOK_URL
+        sync: false
+      # Same host + /webhooks/apify/scrape
+      - key: APIFY_SCRAPE_WEBHOOK_URL
+        sync: false
+      - key: CORS_ORIGINS
+        value: https://navix-ai-virid.vercel.app,https://navix-ai-houssems-projects-e5951612.vercel.app
+      - key: DATA_REFRESH_ENABLED
+        value: "true"
+      - key: CONTENT_UNDERSTANDING_ENABLED
+        value: "true"
+      - key: CONTENT_UNDERSTAND_MAX_PER_RUN
+        value: "6"
