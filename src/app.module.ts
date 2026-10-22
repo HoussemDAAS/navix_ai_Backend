@@ -15,6 +15,7 @@ import { DraftsModule } from './drafts/drafts.module';
 import { CalendarModule } from './calendar/calendar.module';
 import { StudioModule } from './studio/studio.module';
 import { KnowledgeModule } from './knowledge/knowledge.module';
+import { HealthController } from './health.controller';
 
 @Module({
   imports: [
@@ -35,5 +36,6 @@ import { KnowledgeModule } from './knowledge/knowledge.module';
     StudioModule,
     KnowledgeModule,
   ],
+  controllers: [HealthController],
 })
 export class AppModule {}
