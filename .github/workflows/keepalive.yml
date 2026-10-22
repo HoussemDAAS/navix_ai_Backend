@@ -1,0 +1,27 @@
+# Keeps the free Render services awake during the day so demos do not hit a cold start.
+# Render Free gives 750 instance hours per month for the whole workspace, so the pings are
+# limited to working hours: the API 08:00 to 21:59 UTC, the AI service 09:00 to 18:59 UTC
+# (about 720 hours per month in total). Outside these windows the services sleep and wake
+# on the first request (about one minute).
+name: Keep Render services awake
+
+on:
+  schedule:
+    - cron: "*/14 8-21 * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping the API
+        run: curl -fsS -m 90 https://navix-api-9g9p.onrender.com/health
+      - name: Ping the AI service (09:00 to 18:59 UTC only)
+        run: |
+          hour=$(date -u +%H)
+          if [ "$hour" -ge 9 ] && [ "$hour" -lt 19 ]; then
+            curl -fsS -m 90 https://navix-ai-service.onrender.com/health
+          else
+            echo "outside the AI service window, skipped"
+          fi
