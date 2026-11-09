@@ -109,40 +109,23 @@ export class DirectionsService {
 
     const client = this.supabaseService.getClient();
 
-    // Resolve latest brief
-    const { data: brief, error: briefError } = await client
-      .from('analysis_briefs')
-      .select('id')
-      .eq('project_id', projectId)
-      .order('generated_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (briefError) {
-      this.logger.error(
-        `Failed to fetch latest brief for project ${projectId}: ${briefError.message}`,
-      );
-      throw new Error(`Failed to fetch latest brief: ${briefError.message}`);
-    }
-
-    if (!brief) {
-      return [];
-    }
-
+    // Every idea of the project, whichever brief it hangs on: the Studio attaches its ideas
+    // to the brief of the moment, and a later market analysis must not hide them.
     const { data, error } = await client
       .from('content_directions')
-      .select('*')
-      .eq('brief_id', (brief as { id: string }).id)
+      .select('*, analysis_briefs!inner(project_id)')
+      .eq('analysis_briefs.project_id', projectId)
       .order('created_at', { ascending: false });
 
     if (error) {
-      this.logger.error(
-        `Failed to fetch directions for brief ${(brief as { id: string }).id}: ${error.message}`,
-      );
+      this.logger.error(`Failed to fetch directions for project ${projectId}: ${error.message}`);
       throw new Error(`Failed to fetch directions: ${error.message}`);
     }
 
-    return (data ?? []) as DirectionRow[];
+    return (data ?? []).map((row) => {
+      const { analysis_briefs: _brief, ...direction } = row as DirectionRow & { analysis_briefs: unknown };
+      return direction as DirectionRow;
+    });
   }
 
   async updateDirection(
