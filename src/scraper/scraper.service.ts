@@ -202,6 +202,10 @@ function toHashtagToken(h: string): string {
   return h.replace(/^#/, '').replace(/\s+/g, '').toLowerCase();
 }
 
+// The Instagram search actor resolves profiles one by one and can run for 15 minutes or
+// more; a discovery must never wait for that. Apify stops the run and we keep its items.
+const DISCOVERY_ACTOR_TIMEOUT_SECS = 300;
+
 @Injectable()
 export class ScraperService implements OnModuleInit {
   private readonly logger = new Logger(ScraperService.name);
@@ -953,7 +957,7 @@ export class ScraperService implements OnModuleInit {
   ): Promise<Record<string, unknown>[]> {
     try {
       this.logger.log(`[${label}] Launching actor ${actorId}`);
-      const items = await this.apify.items(label, actorId, input);
+      const items = await this.apify.items(label, actorId, input, { timeoutSecs: DISCOVERY_ACTOR_TIMEOUT_SECS });
       this.logger.log(`[${label}] ${items.length} items`);
       return items;
     } catch (err) {

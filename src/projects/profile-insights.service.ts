@@ -208,6 +208,17 @@ export class ProfileInsightsService {
         this.logger.warn(`Own identity refresh failed for @${handle}: ${(err as Error).message}`);
       }
     }
+    // The last read of the account, so the page can say why there is no data yet
+    const { data: lastJob } = await client
+      .from('scrape_jobs')
+      .select('status, error')
+      .eq('project_id', projectId)
+      .eq('source_type', 'self')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const scrape = (lastJob as { status?: string; error?: string | null } | null) ?? null;
+
     const stats = accountAnalytics(
       {
         id: null,
@@ -251,6 +262,8 @@ export class ProfileInsightsService {
       insight_status: insight.status,
       insight_error: insight.error,
       insight_generated_at: insight.generated_at,
+      scrape_status: scrape?.status ?? null,
+      scrape_error: scrape?.status === 'failed' ? (scrape.error ?? 'The account could not be read.') : null,
     };
   }
 

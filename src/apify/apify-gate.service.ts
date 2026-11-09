@@ -90,7 +90,12 @@ export class ApifyGateService {
   ): Promise<Record<string, unknown>[]> {
     const run = await this.call(label, actorId, input, opts);
     this.logger.log(`[${label}] run ${run.id} finished with status=${run.status}`);
-    if (run.status !== 'SUCCEEDED' || !run.defaultDatasetId) return [];
+    // A run stopped by its time limit keeps what it collected: partial results beat none
+    const usable = run.status === 'SUCCEEDED' || run.status === 'TIMED-OUT';
+    if (!usable || !run.defaultDatasetId) return [];
+    if (run.status === 'TIMED-OUT') {
+      this.logger.warn(`[${label}] run ${run.id} hit its time limit; using the items collected so far`);
+    }
     const { items } = await this.client.dataset(run.defaultDatasetId).listItems({ limit });
     return items as Record<string, unknown>[];
   }
