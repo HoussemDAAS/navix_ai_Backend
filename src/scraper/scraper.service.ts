@@ -204,7 +204,7 @@ function toHashtagToken(h: string): string {
 
 // The Instagram search actor resolves profiles one by one and can run for 15 minutes or
 // more; a discovery must never wait for that. Apify stops the run and we keep its items.
-const DISCOVERY_ACTOR_TIMEOUT_SECS = 300;
+const DISCOVERY_ACTOR_TIMEOUT_SECS = 180;
 
 @Injectable()
 export class ScraperService implements OnModuleInit {
@@ -620,15 +620,9 @@ export class ScraperService implements OnModuleInit {
       };
       let hashtagItems: Record<string, unknown>[] = [];
       const runs: Array<Promise<void>> = [];
-      if (plan.search_queries.length > 0) {
-        runs.push(
-          this.runActor('IG Expand Search', 'apify/instagram-search-scraper', {
-            search: plan.search_queries.join(', '),
-            searchType: 'user',
-            searchLimit: 10,
-          }).then((items) => add(this.discoveryIngestService.parseByStrategy('ig_search', items))),
-        );
-      }
+      // The Instagram search actor is slow (one profile every 15 to 20 s) and an expansion
+      // already gets its best matches from the anchor's related profiles and hashtags, so the
+      // search is left out here: faster for the user and cheaper on the Apify quota.
       if (plan.hashtags.length > 0) {
         runs.push(
           this.runActor('IG Expand Hashtag', 'apify/instagram-hashtag-scraper', {
